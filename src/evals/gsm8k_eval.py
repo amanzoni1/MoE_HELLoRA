@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import gc
 import re
 import json
 import time
@@ -88,7 +89,7 @@ def merge_and_save(base_model: str, adapter: str, out_dir: str):
     base = AutoModelForCausalLM.from_pretrained(
         base_model,
         torch_dtype=torch.bfloat16,
-        device_map="auto",
+        device_map="cpu",
         trust_remote_code=True
     )
 
@@ -100,6 +101,15 @@ def merge_and_save(base_model: str, adapter: str, out_dir: str):
     # Shard size 2GB to prevent OOM
     model.save_pretrained(out_dir, safe_serialization=True, max_shard_size="2GB")
     tokenizer.save_pretrained(out_dir)
+
+    print("[MERGE] Cleaning up VRAM...")
+
+    del model, base, tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    print("[MERGE] Done. GPU is pristine.")
+
     return out_dir
 
 # -----------------------------
@@ -115,11 +125,9 @@ def run_inference_vllm(model_path: str, prompts: List[str], max_tokens: int, tp:
         dtype="bfloat16",
         tensor_parallel_size=tp,
         trust_remote_code=True,
-        gpu_memory_utilization=0.90
+        gpu_memory_utilization=0.85
     )
 
-    # FIX: Stop on newline+Question to avoid stopping mid-reasoning
-    # FIX: Added \n\nQuestion: just in case formatting varies
     sampling_params = SamplingParams(
         temperature=0,
         max_tokens=max_tokens,
