@@ -8,7 +8,6 @@ import argparse
 import random
 import hashlib
 import torch
-from dataclasses import asdict, dataclass
 from typing import Optional, List
 from datasets import load_dataset
 from tqdm.auto import tqdm
@@ -24,9 +23,8 @@ try:
 except ImportError:
     LLM = None
 
-# -----------------------------
-# 1. Configuration & Prompting
-# -----------------------------
+
+# Configuration & Prompting
 PLAIN_TEMPLATE = "Question: {q}\nAnswer:"
 
 def build_prompt(q: str, template: str) -> str:
@@ -41,9 +39,8 @@ def set_repro(seed: int):
 def short_hash(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:8]
 
-# -----------------------------
-# 2. Robust Extraction & Normalization
-# -----------------------------
+
+# Robust Extraction & Normalization
 def normalize_number(s: str) -> str:
     if not s:
         return s
@@ -74,9 +71,8 @@ def extract_answer(text: str) -> Optional[str]:
 
     return None
 
-# -----------------------------
-# 3. Model Backend: Merge
-# -----------------------------
+
+# Model Backend: Merge
 def merge_and_save(base_model: str, adapter: str, out_dir: str):
     """Merges LoRA into base model safely with sharding."""
     from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -112,9 +108,8 @@ def merge_and_save(base_model: str, adapter: str, out_dir: str):
 
     return out_dir
 
-# -----------------------------
-# 4. Inference Engines
-# -----------------------------
+
+# Inference Engines
 def run_inference_vllm(model_path: str, prompts: List[str], max_tokens: int, tp: int) -> List[str]:
     if LLM is None:
         raise ImportError("vLLM not installed.")
@@ -190,9 +185,8 @@ def run_inference_hf(model_path: str, adapter: str, prompts: List[str], max_toke
 
     return results
 
-# -----------------------------
-# 5. Main Execution
-# -----------------------------
+
+# Main Execution
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_name", required=True)
