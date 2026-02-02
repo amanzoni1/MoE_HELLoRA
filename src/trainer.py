@@ -15,6 +15,7 @@ from transformers import (
     set_seed
 )
 from peft import LoraConfig, get_peft_model
+from huggingface_hub import HfApi
 
 try:
     import wandb
@@ -50,6 +51,7 @@ def run_training(
     # Hyperparam Overrides
     lr: Optional[float] = None,
     epochs: Optional[int] = None,
+    train_samples: Optional[int] = None,
     bs: Optional[int] = None,
     grad_acc: Optional[int] = None,
     r: Optional[int] = None,
@@ -57,11 +59,12 @@ def run_training(
     dropout: Optional[float] = None,
     seed: Optional[int] = None,
     max_len: Optional[int] = None,
-    # Logging Overrides
+    # Misc
     use_wandb: Optional[bool] = None,
     wandb_project: Optional[str] = None,
-    # Debug
-    train_samples: Optional[int] = None
+    push_to_hub: bool = False,
+    hub_repo: Optional[str] = None,
+    hub_private: bool = False,
 ):
     # Global Setup
     seed_eff = seed if seed is not None else TRAIN_CFG.seed
@@ -87,6 +90,9 @@ def run_training(
     dropout_eff = dropout if dropout is not None else TRAIN_CFG.dropout
 
     hot_k = infer_hot_k(hotmap_json) if mode == "hot" else None
+
+    if push_to_hub and not hub_repo:
+        raise ValueError("push_to_hub=True requires hub_repo like 'username/repo_name'")
 
     # W&B Init
     use_wandb_eff = use_wandb if use_wandb is not None else TRAIN_CFG.use_wandb
@@ -230,6 +236,21 @@ def run_training(
     model.save_pretrained(final_path)
     tokenizer.save_pretrained(final_path)
     print(f"Saved Final Adapter -> {final_path}")
+
+    # Push to Hub
+    if push_to_hub:
+        api = HfApi()
+        api.create_repo(repo_id=hub_repo, repo_type="model", exist_ok=True, private=hub_private)
+
+        # Upload ONLY the final adapter folder content
+        api.upload_folder(
+            repo_id=hub_repo,
+            repo_type="model",
+            folder_path=final_path,
+            path_in_repo=".",
+            ignore_patterns=["**/checkpoint-*"]
+        )
+        print(f"[HF] Pushed final_adapter to: {hub_repo}")
 
     if use_wandb_eff and wandb is not None:
         wandb.finish()

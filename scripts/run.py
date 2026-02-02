@@ -20,6 +20,7 @@ def main():
     # --- Hyperparams (Default None = Use Registry/Config) ---
     parser.add_argument("--lr", type=float, default=None, help="Override Registry LR")
     parser.add_argument("--epochs", type=int, default=None, help="Override Registry Epochs")
+    parser.add_argument("--train_samples", type=int, default=None, help="Debug: limit train samples")
     parser.add_argument("--bs", type=int, default=None, help=f"Override Config BS ({TRAIN_CFG.per_device_bs})")
     parser.add_argument("--grad_acc", type=int, default=None, help=f"Override Config GradAcc ({TRAIN_CFG.grad_acc})")
     parser.add_argument("--seed", type=int, default=None, help=f"Override ({TRAIN_CFG.seed})")
@@ -31,6 +32,9 @@ def main():
     # --- Misc ---
     parser.add_argument("--wandb_project", type=str, default=None)
     parser.add_argument("--no_wandb", action="store_true")
+    parser.add_argument("--push_to_hub", action="store_true")
+    parser.add_argument("--hub_repo", type=str, default=None, help="e.g. username/repo_name")
+    parser.add_argument("--hub_private", action="store_true")
 
     args = parser.parse_args()
     run_name = f"{args.task}_{args.mode}" + (f"_k{args.k}" if args.mode == "hot" else "_lora")
@@ -54,6 +58,7 @@ def main():
         hotmap_json=hotmap_path,
         lr=args.lr,
         epochs=args.epochs,
+        train_samples=args.train_samples,
         bs=args.bs,
         grad_acc=args.grad_acc,
         r=args.r,
@@ -62,7 +67,10 @@ def main():
         seed=args.seed,
         max_len=args.max_len,
         use_wandb=(not args.no_wandb),
-        wandb_project=args.wandb_project
+        wandb_project=args.wandb_project,
+        push_to_hub=args.push_to_hub,
+        hub_repo=args.hub_repo,
+        hub_private=args.hub_private,
     )
 
 if __name__ == "__main__":
