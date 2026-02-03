@@ -102,6 +102,7 @@ def run_training(
     print(f"  model_id:      {TRAIN_CFG.model_id}")
     print(f"  dataset:       {dataset_key}")
     print(f"  run_name:      {run_name}")
+    print(f"  seed:          {seed_eff}")
     print(f"  mode:          {mode}")
     print(f"  hotmap_json:   {hotmap_json}")
     print(f"  hot_k:         {hot_k}")
@@ -219,6 +220,7 @@ def run_training(
     # Training Arguments
     args = TrainingArguments(
         output_dir=out_dir,
+        seed=seed_eff,
         per_device_train_batch_size=bs_eff,
         gradient_accumulation_steps=grad_acc_eff,
         learning_rate=lr_eff,
