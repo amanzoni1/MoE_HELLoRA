@@ -34,7 +34,7 @@ class TrainConfig:
     # --- Hardware / Paper Training Defaults ---
     per_device_bs: int = 8
     grad_acc: int = 8
-    gradient_checkpointing: bool = True
+    gradient_checkpointing: bool = False
     use_cache: bool = False
     tf32: bool = True
 
