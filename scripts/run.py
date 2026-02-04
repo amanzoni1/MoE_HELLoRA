@@ -38,6 +38,8 @@ def main():
 
     args = parser.parse_args()
     run_name = f"{args.task}_{args.mode}" + (f"_k{args.k}" if args.mode == "hot" else "_lora")
+    if args.seed is not None:
+        run_name += f"_s{args.seed}"
 
     # Hotmap
     hotmap_path = None
