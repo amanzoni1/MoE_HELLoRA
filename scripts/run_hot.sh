@@ -19,11 +19,9 @@ cd "$PROJECT_DIR"
 python -m scripts.run \
   --task gsm8k \
   --mode hot \
+  --model_tag olmoe \
   --seed "$SEED" \
   --k "$K" \
   --hotmap_dir "$PROJECT_DIR/outputs/hotmaps" \
   --hotmap_template "telemetry_{task}_train_n7473_seed123_global_hotmap_counts_k{k}.json" \
-  --push_to_hub \
-  --hub_repo_template "AManzoni/hellora-olmoe-{task}_hot_k{k}_s{seed}" \
-  --hub_private \
   --cleanup_after_push

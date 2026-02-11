@@ -122,7 +122,7 @@ def run_training(
     if use_wandb_eff and wandb is not None:
         wandb.init(
             project=project_eff,
-            name=f"{dataset_key}_{run_name}",
+            name=run_name,
             config={
                 "model": TRAIN_CFG.model_id,
                 "dataset": dataset_key,

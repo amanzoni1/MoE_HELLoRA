@@ -1,16 +1,19 @@
 import argparse
 import os
+from huggingface_hub import HfApi
 from src.utils_profiling import build_hotmap
 from src.trainer import run_training
 from src.data_registry import DATASETS
 from src.config import TRAIN_CFG
 
 def main():
-    parser = argparse.ArgumentParser(description="HELLoRA Experiment Launcher")
+    parser = argparse.ArgumentParser(description="Experiment Launcher")
 
     # --- Essentials ---
     parser.add_argument("--task", type=str, required=True, choices=list(DATASETS.keys()))
     parser.add_argument("--mode", type=str, default="hot", choices=["hot", "full"])
+    parser.add_argument("--model_tag", type=str, default=None, help="Short model tag for names (e.g. olmoe)")
+    parser.add_argument("--seed", type=int, default=None, help=f"Override ({TRAIN_CFG.seed})")
 
     # --- Hot Mode ---
     parser.add_argument("--k", type=int, default=16)
@@ -25,30 +28,27 @@ def main():
     )
     parser.add_argument("--hotmap_mode", type=str, default="counts", choices=["counts", "mass"])
 
-    # --- Hyperparams (Default None = Use Registry/Config) ---
+    # --- Training Overrides (Default None = Use Registry/Config) ---
     parser.add_argument("--lr", type=float, default=None, help="Override Registry LR")
     parser.add_argument("--epochs", type=int, default=None, help="Override Registry Epochs")
     parser.add_argument("--train_samples", type=int, default=None, help="Debug: limit train samples")
     parser.add_argument("--bs", type=int, default=None, help=f"Override Config BS ({TRAIN_CFG.per_device_bs})")
     parser.add_argument("--grad_acc", type=int, default=None, help=f"Override Config GradAcc ({TRAIN_CFG.grad_acc})")
-    parser.add_argument("--seed", type=int, default=None, help=f"Override ({TRAIN_CFG.seed})")
     parser.add_argument("--max_len", type=int, default=None, help=f"Override ({TRAIN_CFG.max_len})")
     parser.add_argument("--r", type=int, default=None, help=f"Override ({TRAIN_CFG.r})")
     parser.add_argument("--alpha", type=int, default=None, help=f"Override ({TRAIN_CFG.alpha})")
     parser.add_argument("--dropout", type=float, default=None, help=f"Override ({TRAIN_CFG.dropout})")
 
-    # --- Misc ---
+    # --- Tracking (W&B) ---
     parser.add_argument("--wandb_project", type=str, default=None)
     parser.add_argument("--no_wandb", action="store_true")
-    parser.add_argument("--push_to_hub", action="store_true")
-    parser.add_argument("--hub_repo", type=str, default=None, help="e.g. username/repo_name")
-    parser.add_argument(
-        "--hub_repo_template",
-        type=str,
-        default=None,
-        help="Template with {k}, {task}, {seed}, {mode}. Example: AManzoni/hellora-olmoe-{task}_hot_k{k}_s{seed}",
-    )
-    parser.add_argument("--hub_private", action="store_true")
+
+    # --- Hub ---
+    parser.add_argument("--no_push_to_hub", action="store_false", dest="push_to_hub")
+    parser.add_argument("--hub_repo", type=str, default=None, help="Repo name")
+    parser.add_argument("--hub_public", action="store_false", dest="hub_private")
+
+    # --- Cleanup ---
     parser.add_argument(
         "--cleanup_after_push",
         action="store_true",
@@ -56,14 +56,16 @@ def main():
     )
 
     args = parser.parse_args()
-    run_name = f"{args.task}_{args.mode}" + (f"_k{args.k}" if args.mode == "hot" else "_lora")
-    if args.seed is not None:
-        run_name += f"_s{args.seed}"
-
     seed_eff = args.seed if args.seed is not None else TRAIN_CFG.seed
 
-    def render_template(tpl: str) -> str:
-        return tpl.format(task=args.task, mode=args.mode, k=args.k, seed=seed_eff)
+    if args.model_tag:
+        model_tag = args.model_tag
+    else:
+        model_id = TRAIN_CFG.model_id.split("/")[-1]
+        model_tag = model_id.split("-")[0].lower() if "-" in model_id else model_id.lower()
+
+    mode_tag = f"hotk{args.k}" if args.mode == "hot" else "full_lora"
+    run_name = f"{model_tag}_{args.task}_s{seed_eff}_{mode_tag}"
 
     # Hotmap
     hotmap_path = None
@@ -71,17 +73,38 @@ def main():
         if args.hotmap:
             hotmap_path = args.hotmap
         elif args.hotmap_template:
-            hotmap_file = render_template(args.hotmap_template)
+            hotmap_file = args.hotmap_template.format(
+                task=args.task,
+                mode=args.mode,
+                k=args.k,
+                seed=seed_eff,
+                model=model_tag,
+                run_name=run_name,
+            )
             hotmap_path = os.path.join(args.hotmap_dir, hotmap_file) if args.hotmap_dir else hotmap_file
         elif args.telemetry:
             hotmap_path = build_hotmap(args.telemetry, k=args.k, mode=args.hotmap_mode)
         else:
             raise ValueError("hot mode requires --hotmap or --telemetry")
 
-    # Hub repo templating
-    hub_repo = args.hub_repo
-    if args.push_to_hub and not hub_repo and args.hub_repo_template:
-        hub_repo = render_template(args.hub_repo_template)
+    # Hub repo resolution
+    if args.push_to_hub:
+        if args.hub_repo:
+            repo_name = args.hub_repo
+        else:
+            repo_name = run_name
+
+        try:
+            info = HfApi().whoami()
+            hub_user = info.get("name")
+        except Exception:
+            hub_user = None
+        if not hub_user:
+            raise ValueError("Could not detect HF username. Run `huggingface-cli login` or pass a valid token.")
+
+        hub_repo = f"{hub_user}/{repo_name}"
+    else:
+        hub_repo = None
 
     # Launch
     print(f"Launching: {run_name}")
