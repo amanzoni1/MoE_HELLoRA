@@ -37,6 +37,14 @@ DATASETS = {
     }
 }
 
+EVAL_DATASETS = {
+    "gsm8k": {
+        "path": "openai/gsm8k",
+        "name": "main",
+        "split": "test",
+    },
+}
+
 def load_and_format_dataset(key: str, tokenizer, max_len: int, n_samples: Optional[int] = None, seed: int = 123):
     """
     Helper used by TRAINER.PY to get tokenized, ready-to-train tensors.
