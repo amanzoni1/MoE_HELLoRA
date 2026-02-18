@@ -24,11 +24,17 @@ except ImportError:
 
 from .config import SYS_CFG, TRAIN_CFG
 from .data_registry import DATASETS, load_and_format_dataset
-from .utils_training import get_targets, infer_hot_k
+from .utils_training import get_targets, infer_hot_k, build_random_hotmap
 
 
 # Helpers
-def save_run_artifacts(out_dir: str, run_cfg: Dict[str, Any], targets: List[str], hotmap_json: Optional[str]):
+def save_run_artifacts(
+    out_dir: str,
+    run_cfg: Dict[str, Any],
+    targets: List[str],
+    hotmap_json: Optional[str],
+    random_hotmap: Optional[Dict[str, List[int]]] = None,
+):
     """Saves config and targets BEFORE training starts (Crash recovery)."""
     os.makedirs(out_dir, exist_ok=True)
     # Save Run Config
@@ -40,6 +46,9 @@ def save_run_artifacts(out_dir: str, run_cfg: Dict[str, Any], targets: List[str]
     # Backup the Hotmap used
     if hotmap_json and os.path.exists(hotmap_json):
         shutil.copy(hotmap_json, os.path.join(out_dir, "hotmap_used.json"))
+    if random_hotmap is not None:
+        with open(os.path.join(out_dir, "random_hotmap_used.json"), "w") as f:
+            json.dump(random_hotmap, f, indent=2)
 
 
 # MAIN TRAINING ROUTINE
@@ -48,6 +57,8 @@ def run_training(
     run_name: str,
     mode: str = "hot",
     hotmap_json: Optional[str] = None,
+    random_k: Optional[int] = None,
+    random_seed: Optional[int] = None,
     # Hyperparam Overrides
     lr: Optional[float] = None,
     epochs: Optional[int] = None,
@@ -90,7 +101,14 @@ def run_training(
     alpha_eff = alpha if alpha is not None else TRAIN_CFG.alpha
     dropout_eff = dropout if dropout is not None else TRAIN_CFG.dropout
 
-    hot_k = infer_hot_k(hotmap_json) if mode == "hot" else None
+    random_seed_eff = random_seed if random_seed is not None else seed_eff
+
+    if mode == "hot":
+        hot_k = infer_hot_k(hotmap_json)
+    elif mode == "random":
+        hot_k = random_k
+    else:
+        hot_k = None
 
     use_wandb_eff = use_wandb if use_wandb is not None else TRAIN_CFG.use_wandb
     project_eff = wandb_project if wandb_project is not None else TRAIN_CFG.wandb_project
@@ -107,6 +125,8 @@ def run_training(
     print(f"  mode:          {mode}")
     print(f"  hotmap_json:   {hotmap_json}")
     print(f"  hot_k:         {hot_k}")
+    if mode == "random":
+        print(f"  random_seed:   {random_seed_eff}")
     print(f"  lr:            {lr_eff}")
     print(f"  epochs:        {epochs_eff}")
     print(f"  bs:            {bs_eff}")
@@ -164,7 +184,24 @@ def run_training(
         model.config.use_cache = TRAIN_CFG.use_cache
 
     # Target Selection
-    targets = get_targets(model, mode, hotmap_json)
+    targets = get_targets(
+        model,
+        mode,
+        hotmap_json=hotmap_json,
+        random_k=random_k,
+        random_seed=random_seed_eff,
+    )
+    random_hotmap = None
+    if mode == "random":
+        if random_k is None:
+            raise ValueError("mode='random' requires random_k")
+        if hasattr(model, "model"):
+            layers = model.model.layers
+        else:
+            layers = model.layers
+        num_layers = len(layers)
+        num_experts = getattr(model.config, "num_experts", 64)
+        random_hotmap = build_random_hotmap(num_layers, num_experts, int(random_k), int(random_seed_eff))
 
     # PEFT Application
     peft_config = LoraConfig(
@@ -203,10 +240,12 @@ def run_training(
             "lora": {"r": r_eff, "alpha": alpha_eff, "dropout": dropout_eff},
             "hotmap_json": hotmap_json,
             "hot_k": hot_k,
+            "random_seed": random_seed_eff if mode == "random" else None,
             "train_samples": train_samples,
         },
         targets=targets,
-        hotmap_json=hotmap_json
+        hotmap_json=hotmap_json,
+        random_hotmap=random_hotmap,
     )
 
     # Data Loading

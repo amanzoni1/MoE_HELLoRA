@@ -1,5 +1,6 @@
 import os
 import json
+import random
 from typing import List, Dict, Optional
 
 
@@ -33,6 +34,21 @@ def targets_hot_experts(hot_map: Dict[str, List[int]]) -> List[str]:
             for p in EXPERT_PROJS:
                 targets.append(f"model.layers.{layer_idx}.mlp.experts.{e}.{p}")
     return targets
+
+
+def build_random_hotmap(num_layers: int, num_experts: int, k: int, seed: int) -> Dict[str, List[int]]:
+    """Build deterministic random top-k experts per layer."""
+    if k <= 0:
+        raise ValueError(f"random k must be > 0, got {k}")
+    if k > num_experts:
+        raise ValueError(f"random k={k} exceeds num_experts={num_experts}")
+
+    rng = random.Random(seed)
+    out: Dict[str, List[int]] = {}
+    for layer_idx in range(num_layers):
+        picks = sorted(rng.sample(range(num_experts), k))
+        out[str(layer_idx)] = picks
+    return out
 
 
 # Helpers & Validators
@@ -72,7 +88,13 @@ def validate_targets(model, targets: List[str]) -> List[str]:
     return kept
 
 # Main Entry Point
-def get_targets(model, mode: str, hotmap_json: Optional[str] = None) -> List[str]:
+def get_targets(
+    model,
+    mode: str,
+    hotmap_json: Optional[str] = None,
+    random_k: Optional[int] = None,
+    random_seed: Optional[int] = None,
+) -> List[str]:
     """
     The Master Function.
     Args:
@@ -122,6 +144,20 @@ def get_targets(model, mode: str, hotmap_json: Optional[str] = None) -> List[str
         active_slots = sum(len(v) for v in hot_map.values())
         print(f"   + Hotmap file: {hotmap_json}")
         print(f"   + Active Experts (from hotmap): {active_slots} / {total_slots} ({active_slots/total_slots:.1%})")
+
+    elif mode == "random":
+        if random_k is None:
+            raise ValueError("Mode 'random' requires random_k (usually from --k).")
+        seed_eff = int(random_seed or 0)
+        hot_map = build_random_hotmap(num_layers, num_experts, int(random_k), seed_eff)
+        expert_targets = targets_hot_experts(hot_map)
+        targets += expert_targets
+
+        print(f"   + Attention targets: {len(attn_targets)}")
+        print(f"   + Router gate targets: {len(gate_targets)}")
+        print(f"   + Expert targets (RANDOM): {len(expert_targets)}")
+        print(f"   + Random seed: {seed_eff}")
+        print(f"   + Random k: {int(random_k)}")
 
     else:
         raise ValueError(f"Unknown mode: {mode}")

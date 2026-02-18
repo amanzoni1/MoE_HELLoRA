@@ -11,12 +11,13 @@ def main():
 
     # --- Essentials ---
     parser.add_argument("--task", type=str, required=True, choices=list(DATASETS.keys()))
-    parser.add_argument("--mode", type=str, default="hot", choices=["hot", "full"])
+    parser.add_argument("--mode", type=str, default="hot", choices=["hot", "full", "random"])
     parser.add_argument("--model_tag", type=str, default=None, help="Short model tag for names (e.g. olmoe)")
     parser.add_argument("--seed", type=int, default=None, help=f"Override ({TRAIN_CFG.seed})")
 
     # --- Hot Mode ---
     parser.add_argument("--k", type=int, default=16)
+    parser.add_argument("--random_seed", type=int, default=None, help="Random expert selector seed (mode=random)")
     parser.add_argument("--telemetry", type=str, help="Path to telemetry .pt")
     parser.add_argument("--hotmap", type=str, help="Path to hotmap .json")
     parser.add_argument("--hotmap_dir", type=str, default=None, help="Optional dir for hotmap_template")
@@ -64,7 +65,12 @@ def main():
         model_id = TRAIN_CFG.model_id.split("/")[-1]
         model_tag = model_id.split("-")[0].lower() if "-" in model_id else model_id.lower()
 
-    mode_tag = f"hotk{args.k}" if args.mode == "hot" else "full_lora"
+    if args.mode == "hot":
+        mode_tag = f"hotk{args.k}"
+    elif args.mode == "random":
+        mode_tag = f"randk{args.k}"
+    else:
+        mode_tag = "full_lora"
     run_name = f"{model_tag}_{args.task}_s{seed_eff}_{mode_tag}"
 
     # Hotmap
@@ -113,6 +119,8 @@ def main():
         run_name=run_name,
         mode=args.mode,
         hotmap_json=hotmap_path,
+        random_k=(args.k if args.mode == "random" else None),
+        random_seed=args.random_seed,
         lr=args.lr,
         epochs=args.epochs,
         train_samples=args.train_samples,
