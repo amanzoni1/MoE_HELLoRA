@@ -112,7 +112,7 @@ DATASETS = {
         "text_fn": fmt_boolq,
     },
     "piqa": {
-        "path": "ybisk/piqa",
+        "path": "lighteval/piqa",
         "name": None,
         "split": "train",
         "text_fn": fmt_piqa,
