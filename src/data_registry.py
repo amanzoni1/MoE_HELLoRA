@@ -51,6 +51,10 @@ def fmt_mmlu(ex):
     ans_idx = ex["answer"]
     return f"Question: {ex['question']}\n{opts}\nAnswer: {labels[ans_idx]}"
 
+def fmt_spider(ex):
+    """Spider: natural language question → SQL query."""
+    return f"Question: {ex['question']}\nSQL: {ex['query']}"
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Dataset Registry
@@ -128,6 +132,13 @@ DATASETS = {
         "name": "all",
         "split": "test",               # MMLU "test" is the standard eval split
         "text_fn": fmt_mmlu,
+    },
+    "spider": {
+        "path": "spider",
+        "name": None,
+        "split": "train",              # 7,000 examples; eval on validation (1,034)
+        "text_fn": fmt_spider,
+        "lr": 4e-4, "epochs": 3,      # same defaults as gsm8k — similar dataset size
     },
 }
 
