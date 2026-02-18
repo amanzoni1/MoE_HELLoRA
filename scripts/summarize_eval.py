@@ -171,7 +171,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Summarize eval results across seeds/k-values. Auto-detects metric type."
     )
-    parser.add_argument("--input_dir", default="./eval_results")
+    parser.add_argument("--input_dir", default="./outputs/eval_results/gsm8k/summaries")
     parser.add_argument("--pattern", default="*_summary.json")
     parser.add_argument("--seeds", default=None, help="Comma-separated list, e.g. 42,99,123")
     parser.add_argument("--ks", default=None, help="Comma-separated list, e.g. 4,8,12,16")
