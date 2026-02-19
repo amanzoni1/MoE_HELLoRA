@@ -54,12 +54,27 @@ def _infer_model_seed_from_adapter(adapter: Optional[str]) -> Optional[int]:
     return int(match.group(1))
 
 
-def _infer_hotk_from_adapter(adapter: Optional[str]) -> Optional[int]:
+def _infer_selection_mode_from_adapter(adapter: Optional[str]) -> Optional[str]:
     if not adapter:
         return None
     name = _strip_hub_prefix(adapter)
-    match = re.search(r"hot[_-]?k(\d+)", name)
+    if "full_lora" in name:
+        return "full"
+    if re.search(r"rand(?:om)?[_-]?k\d+", name):
+        return "random"
+    if re.search(r"hot[_-]?k\d+", name):
+        return "hot"
+    return None
+
+
+def _infer_k_from_adapter(adapter: Optional[str]) -> Optional[int]:
+    if not adapter:
+        return None
+    name = _strip_hub_prefix(adapter)
+    match = re.search(r"(?:hot|rand|random)[_-]?k(\d+)", name)
     if not match:
+        if "full_lora" in name:
+            return 64
         return None
     return int(match.group(1))
 
@@ -77,13 +92,18 @@ def infer_run_name(
 ) -> str:
     model_tag = _infer_model_tag(model_id)
     seed = _infer_model_seed_from_adapter(adapter)
-    hotk = _infer_hotk_from_adapter(adapter)
+    k = _infer_k_from_adapter(adapter)
+    selection = _infer_selection_mode_from_adapter(adapter)
 
     run_name = f"{model_tag}_{task_name}"
     if seed is not None:
         run_name += f"_s{seed}"
-    if hotk is not None:
-        run_name += f"_hotk{hotk}"
+    if selection == "full":
+        run_name += "_full_lora"
+    elif selection == "random" and k is not None:
+        run_name += f"_randk{k}"
+    elif k is not None:
+        run_name += f"_hotk{k}"
     return run_name
 
 
@@ -99,14 +119,14 @@ def run_eval(task_name: str, args: argparse.Namespace):
 
     task = get_task(task_name)
 
-    # # ── Custom eval path (perplexity tasks that need logits) ─────
-    # if getattr(task, "CUSTOM_EVAL", False):
-    #     print(f"[EVAL] Running custom eval for '{task_name}'...")
-    #     t0 = time.time()
-    #     task.run_custom_eval(args)
-    #     duration = time.time() - t0
-    #     print(f"Custom eval done in {duration:.2f}s")
-    #     return
+    # ── Custom eval path (perplexity tasks that need logits) ─────
+    if getattr(task, "CUSTOM_EVAL", False):
+        print(f"[EVAL] Running custom eval for '{task_name}'...")
+        t0 = time.time()
+        task.run_custom_eval(args)
+        duration = time.time() - t0
+        print(f"Custom eval done in {duration:.2f}s")
+        return
 
     # ── Standard generative eval path (GSM8K-style) ─────────────
     ds, prompts, golds = task.load_data(args)
