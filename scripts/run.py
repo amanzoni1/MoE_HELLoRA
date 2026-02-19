@@ -14,6 +14,12 @@ def main():
     parser.add_argument("--mode", type=str, default="hot", choices=["hot", "full", "random"])
     parser.add_argument("--model_tag", type=str, default=None, help="Short model tag for names (e.g. olmoe)")
     parser.add_argument("--seed", type=int, default=None, help=f"Override ({TRAIN_CFG.seed})")
+    parser.add_argument(
+        "--data_seed",
+        type=int,
+        default=None,
+        help="Dataset shuffle seed. Defaults to --seed when not set.",
+    )
 
     # --- Hot Mode ---
     parser.add_argument("--k", type=int, default=16)
@@ -130,6 +136,7 @@ def main():
         alpha=args.alpha,
         dropout=args.dropout,
         seed=args.seed,
+        data_seed=args.data_seed,
         max_len=args.max_len,
         use_wandb=(not args.no_wandb),
         wandb_project=args.wandb_project,

@@ -45,6 +45,8 @@ def main():
     parser.add_argument("--split", type=str, default=None,
                         help="Override split for all selected datasets (default: use registry split)")
     parser.add_argument("--seed", type=int, default=123, help="Random seed")
+    parser.add_argument("--data_seed", type=int, default=None,
+                        help="Dataset shuffle seed (default: uses --seed)")
     parser.add_argument("--run_name", type=str, default="default", help="Tag for output file")
     parser.add_argument("--fail_fast", action="store_true",
                         help="Stop immediately if one dataset fails")
@@ -85,6 +87,7 @@ def main():
                 n_samples=args.n_samples,
                 bs=args.bs,
                 seed=args.seed,
+                data_seed=args.data_seed,
                 run_name=args.run_name,
             )
             elapsed = time.time() - t0
@@ -112,6 +115,7 @@ def main():
     manifest = {
         "model_id": TRAIN_CFG.model_id,
         "seed": args.seed,
+        "data_seed": args.data_seed,
         "n_samples": args.n_samples,
         "batch_size": args.bs,
         "split_override": args.split,

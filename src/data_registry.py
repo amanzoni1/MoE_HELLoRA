@@ -171,7 +171,14 @@ EVAL_DATASETS = {
 # Helpers
 # ═══════════════════════════════════════════════════════════════════
 
-def load_and_format_dataset(key: str, tokenizer, max_len: int, n_samples: Optional[int] = None, seed: int = 123):
+def load_and_format_dataset(
+    key: str,
+    tokenizer,
+    max_len: int,
+    n_samples: Optional[int] = None,
+    seed: int = 123,
+    data_seed: Optional[int] = None,
+):
     """
     Helper used by TRAINER.PY to get tokenized, ready-to-train tensors.
     Requires that the dataset has lr/epochs in the registry OR that
@@ -179,7 +186,8 @@ def load_and_format_dataset(key: str, tokenizer, max_len: int, n_samples: Option
     """
     cfg = DATASETS[key]
     ds = load_dataset(cfg["path"], cfg["name"], split=cfg["split"])
-    ds = ds.shuffle(seed=seed)
+    data_seed_eff = seed if data_seed is None else data_seed
+    ds = ds.shuffle(seed=data_seed_eff)
 
     if n_samples:
         ds = ds.select(range(min(n_samples, len(ds))))

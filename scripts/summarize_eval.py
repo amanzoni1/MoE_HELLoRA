@@ -14,16 +14,23 @@ def _parse_seed(run_name: str) -> Optional[int]:
     return int(match.group(1))
 
 
-def _parse_hotk(run_name: str) -> Optional[int]:
-    match = re.search(r"hot[_-]?k(\d+)", run_name)
+def _parse_k(run_name: str) -> Optional[int]:
+    match = re.search(r"(?:hot|rand|random)[_-]?k(\d+)", run_name)
     if not match:
+        if "full_lora" in run_name:
+            return 64
         return None
     return int(match.group(1))
 
 
-def _detect_dataset(row: Dict) -> Optional[str]:
-    """Detect dataset from summary JSON metadata."""
-    return row.get("dataset", None)
+def _parse_selection_mode(run_name: str) -> str:
+    if "full_lora" in run_name:
+        return "full"
+    if re.search(r"rand(?:om)?[_-]?k\d+", run_name):
+        return "random"
+    if re.search(r"hot[_-]?k\d+", run_name):
+        return "hot"
+    return "unknown"
 
 
 def _detect_metric(row: Dict) -> Tuple[str, str]:
@@ -36,7 +43,7 @@ def _detect_metric(row: Dict) -> Tuple[str, str]:
 
 
 def _load_summaries(input_dir: str, pattern: str) -> List[Dict]:
-    files = glob.glob(os.path.join(input_dir, pattern))
+    files = glob.glob(os.path.join(input_dir, pattern), recursive=True)
     rows = []
     for path in sorted(files):
         try:
@@ -54,20 +61,25 @@ def _filter_rows(
     seeds: Optional[List[int]],
     ks: Optional[List[int]],
     dataset: Optional[str] = None,
+    selection_mode: Optional[str] = None,
 ) -> List[Dict]:
     out = []
     for r in rows:
         run_name = r.get("run_name", "")
         seed = _parse_seed(run_name)
-        hotk = _parse_hotk(run_name)
+        k = _parse_k(run_name)
+        mode = _parse_selection_mode(run_name)
         if seeds is not None and seed not in seeds:
             continue
-        if ks is not None and hotk not in ks:
+        if ks is not None and k not in ks:
             continue
         if dataset is not None and r.get("dataset") != dataset:
             continue
+        if selection_mode is not None and mode != selection_mode:
+            continue
         r["_seed"] = seed
-        r["_hotk"] = hotk
+        r["_k"] = k
+        r["_selection_mode"] = mode
         out.append(r)
     return out
 
@@ -171,11 +183,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="Summarize eval results across seeds/k-values. Auto-detects metric type."
     )
-    parser.add_argument("--input_dir", default="./outputs/eval_results/gsm8k/summaries")
-    parser.add_argument("--pattern", default="*_summary.json")
+    parser.add_argument("--input_dir", default="./outputs/eval_results")
+    parser.add_argument("--pattern", default="**/*_summary.json")
     parser.add_argument("--seeds", default=None, help="Comma-separated list, e.g. 42,99,123")
     parser.add_argument("--ks", default=None, help="Comma-separated list, e.g. 4,8,12,16")
     parser.add_argument("--dataset", default=None, help="Filter by dataset name (gsm8k, wikitext, alpaca)")
+    parser.add_argument(
+        "--selection_mode",
+        default=None,
+        choices=["hot", "random", "full"],
+        help="Filter by expert-selection mode.",
+    )
     parser.add_argument("--show_seeds", action="store_true")
     parser.add_argument("--extended", action="store_true", help="Show variance, SE, CI95, min/max per k")
     parser.add_argument("--out", default=None, help="Write report to this file (e.g., ./eval_results/summary.txt)")
@@ -185,26 +203,33 @@ def main():
     ks = [int(x.strip()) for x in args.ks.split(",")] if args.ks else None
 
     rows = _load_summaries(args.input_dir, args.pattern)
-    rows = _filter_rows(rows, seeds=seeds, ks=ks, dataset=args.dataset)
+    rows = _filter_rows(
+        rows,
+        seeds=seeds,
+        ks=ks,
+        dataset=args.dataset,
+        selection_mode=args.selection_mode,
+    )
 
     if not rows:
         print(f"No summary files found in {args.input_dir} (pattern: {args.pattern}).")
         return
 
-    # Group by dataset, then by k
-    by_dataset: Dict[str, List[Dict]] = {}
+    # Group by dataset + selection mode, then by k
+    by_dataset: Dict[Tuple[str, str], List[Dict]] = {}
     for r in rows:
         ds = r.get("dataset", "unknown")
-        by_dataset.setdefault(ds, []).append(r)
+        mode = r.get("_selection_mode", "unknown")
+        by_dataset.setdefault((ds, mode), []).append(r)
 
     all_lines = []
-    for ds_name in sorted(by_dataset.keys()):
-        ds_rows = by_dataset[ds_name]
+    for ds_name, mode_name in sorted(by_dataset.keys()):
+        ds_rows = by_dataset[(ds_name, mode_name)]
         metric_key, metric_label = _detect_metric(ds_rows[0])
 
         by_k: Dict[int, List[Dict]] = {}
         for r in ds_rows:
-            k = r.get("_hotk")
+            k = r.get("_k")
             if k is None:
                 continue
             by_k.setdefault(k, []).append(r)
@@ -212,7 +237,7 @@ def main():
         if not by_k:
             continue
 
-        all_lines.append(f"\n## {ds_name} ({metric_label})\n")
+        all_lines.append(f"\n## {ds_name} ({metric_label}, mode={mode_name})\n")
 
         if metric_key == "acc":
             all_lines.extend(_format_accuracy_table(by_k, args))

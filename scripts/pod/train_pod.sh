@@ -9,6 +9,7 @@ MODEL_TAG="olmoe"
 SELECTION_MODE="hot"
 SEEDS_CSV="42"
 KS_CSV="4,8,12,14,16,18,20,22,24,32,48"
+DATA_SEED=""
 TELEMETRY_PATH=""
 HOTMAP_DIR="${REPO_ROOT}/outputs/hotmaps"
 HOTMAP_MODE="counts"
@@ -32,6 +33,7 @@ Options:
   --selection-mode <mode>       hot|random for k-sweep runs (default: ${SELECTION_MODE})
   --seeds <csv>                 Training seeds as comma-list (default: ${SEEDS_CSV})
   --ks <csv>                    Hot-k values as comma-list (default: ${KS_CSV})
+  --data-seed <int>             Dataset shuffle seed (default: model seed)
   --telemetry <path>            Explicit telemetry .pt path
   --hotmap-source <mode>        auto|hotmap|telemetry (default: ${HOTMAP_SOURCE})
   --hotmap-dir <path>           Hotmap output dir (default: outputs/hotmaps)
@@ -54,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --selection-mode) SELECTION_MODE="$2"; shift 2 ;;
     --seeds) SEEDS_CSV="$2"; shift 2 ;;
     --ks) KS_CSV="$2"; shift 2 ;;
+    --data-seed) DATA_SEED="$2"; shift 2 ;;
     --telemetry) TELEMETRY_PATH="$2"; shift 2 ;;
     --hotmap-source) HOTMAP_SOURCE="$2"; shift 2 ;;
     --hotmap-dir) HOTMAP_DIR="$2"; shift 2 ;;
@@ -133,6 +136,9 @@ for seed in "${SEEDS[@]}"; do
       --seed "$seed"
       --k "$k"
     )
+    if [[ -n "$DATA_SEED" ]]; then
+      cmd+=(--data_seed "$DATA_SEED")
+    fi
     if [[ "$SELECTION_MODE" == "random" ]]; then
       random_selector_seed=$((seed + RANDOM_SELECTOR_OFFSET))
       cmd+=(--random_seed "$random_selector_seed")
@@ -188,6 +194,9 @@ if [[ "$RUN_FULL" -eq 1 ]]; then
       --model_tag "$MODEL_TAG"
       --seed "$seed"
     )
+    if [[ -n "$DATA_SEED" ]]; then
+      cmd+=(--data_seed "$DATA_SEED")
+    fi
     if [[ "$PUSH_TO_HUB" -eq 0 ]]; then
       cmd+=(--no_push_to_hub)
     elif [[ -n "$HUB_REPO_PREFIX" ]]; then

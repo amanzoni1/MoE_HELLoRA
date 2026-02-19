@@ -69,6 +69,7 @@ def run_training(
     alpha: Optional[int] = None,
     dropout: Optional[float] = None,
     seed: Optional[int] = None,
+    data_seed: Optional[int] = None,
     max_len: Optional[int] = None,
     # Misc
     use_wandb: Optional[bool] = None,
@@ -102,6 +103,7 @@ def run_training(
     dropout_eff = dropout if dropout is not None else TRAIN_CFG.dropout
 
     random_seed_eff = random_seed if random_seed is not None else seed_eff
+    data_seed_eff = data_seed if data_seed is not None else seed_eff
 
     if mode == "hot":
         hot_k = infer_hot_k(hotmap_json)
@@ -122,6 +124,7 @@ def run_training(
     print(f"  dataset:       {dataset_key}")
     print(f"  run_name:      {run_name}")
     print(f"  seed:          {seed_eff}")
+    print(f"  data_seed:     {data_seed_eff}")
     print(f"  mode:          {mode}")
     print(f"  hotmap_json:   {hotmap_json}")
     print(f"  hot_k:         {hot_k}")
@@ -149,6 +152,7 @@ def run_training(
                 "run_name": run_name,
                 "mode": mode,
                 "seed": seed_eff,
+                "data_seed": data_seed_eff,
                 "max_len": max_len_eff,
                 "bs_per_device": bs_eff,
                 "grad_acc": grad_acc_eff,
@@ -232,6 +236,7 @@ def run_training(
             "mode": mode,
             "model_id": TRAIN_CFG.model_id,
             "seed": seed_eff,
+            "data_seed": data_seed_eff,
             "max_len": max_len_eff,
             "lr": lr_eff,
             "epochs": epochs_eff,
@@ -254,7 +259,8 @@ def run_training(
         tokenizer,
         max_len_eff,
         n_samples=train_samples,
-        seed=seed_eff
+        seed=seed_eff,
+        data_seed=data_seed_eff,
     )
 
     # Training Arguments

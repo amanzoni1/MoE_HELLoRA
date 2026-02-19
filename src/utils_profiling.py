@@ -16,6 +16,7 @@ def make_profile(
     run_name: str = "default",
     split: Optional[str] = None,
     seed: int = 123,
+    data_seed: Optional[int] = None,
     n_samples: Optional[int] = None,
     bs: int = 16,
     seq_len: int = 2048,
@@ -33,7 +34,8 @@ def make_profile(
     # Load raw dataset
     target_split = split or ds_cfg["split"]
     raw_ds = load_dataset(ds_cfg["path"], ds_cfg["name"], split=target_split)
-    raw_ds = raw_ds.shuffle(seed=seed)
+    data_seed_eff = seed if data_seed is None else data_seed
+    raw_ds = raw_ds.shuffle(seed=data_seed_eff)
 
     if n_samples is not None:
         raw_ds = raw_ds.select(range(min(n_samples, len(raw_ds))))
@@ -90,6 +92,7 @@ def make_profile(
             "dataset": dataset_key,
             "split": target_split,
             "seed": seed,
+            "data_seed": data_seed_eff,
             "n_requested": n_samples,
             "n_samples": profiled_examples,
             "n_selected": selected_n,
