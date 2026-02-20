@@ -12,7 +12,12 @@ except ImportError:
     wandb = None
 
 from ..data_registry import EVAL_DATASETS
-from ..utils_eval import PLAIN_TEMPLATE, build_prompt
+
+PLAIN_TEMPLATE = "Question: {q}\nAnswer:"
+
+
+def build_prompt(q: str, template: str) -> str:
+    return template.format(q=q)
 
 
 # Robust Extraction & Normalization (GSM8K-specific)

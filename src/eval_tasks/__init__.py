@@ -1,11 +1,11 @@
 from . import gsm8k
-from . import wikitext
-from . import alpaca
+from . import hellaswag
+from . import spider
 
 EVAL_TASKS = {
     "gsm8k": gsm8k,
-    "wikitext": wikitext,
-    "alpaca": alpaca,
+    "hellaswag": hellaswag,
+    "spider": spider,
 }
 
 def get_task(name: str):

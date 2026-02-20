@@ -155,16 +155,15 @@ EVAL_DATASETS = {
         "name": "main",
         "split": "test",
     },
-    "wikitext": {
-        "path": "Salesforce/wikitext",
-        "name": "wikitext-2-raw-v1",
-        "split": "test",
-    },
-    "alpaca": {
-        "path": "sahil2801/CodeAlpaca-20k",
+    "hellaswag": {
+        "path": "Rowan/hellaswag",
         "name": None,
-        "split": "train",           # no test split; we carve a held-out portion
-        "eval_frac": 0.10,          # last 10 % used for eval
+        "split": "validation",      # labels available; standard dev-time split
+    },
+    "spider": {
+        "path": "spider",
+        "name": None,
+        "split": "validation",      # official train/validation partition
     },
 }
 

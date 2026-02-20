@@ -12,12 +12,6 @@ except ImportError:
     LLM = None
 
 
-# Configuration & Prompting
-PLAIN_TEMPLATE = "Question: {q}\nAnswer:"
-
-def build_prompt(q: str, template: str) -> str:
-    return template.format(q=q)
-
 def set_repro(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)
