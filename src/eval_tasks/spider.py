@@ -32,10 +32,6 @@ def _extract_sql(pred_text: str) -> str:
     txt = re.sub(r"```(?:sql)?", "", txt, flags=re.IGNORECASE)
     txt = txt.replace("```", "").strip()
 
-    match = re.search(r"(?is)\bsql\s*:\s*(.+)", txt)
-    if match:
-        txt = match.group(1).strip()
-
     lines = [line.strip() for line in txt.splitlines() if line.strip()]
     if not lines:
         return ""
@@ -49,7 +45,28 @@ def _extract_sql(pred_text: str) -> str:
     if not kept:
         kept = [lines[0]]
 
-    return " ".join(kept).strip()
+    txt = " ".join(kept).strip()
+
+    sql_start = re.compile(r"(?is)^\s*(select|with|insert|update|delete)\b")
+    sql_label = re.search(r"(?is)\bsql\s*:\s*", txt)
+    if sql_label:
+        prefix = txt[:sql_label.start()].strip()
+        suffix = txt[sql_label.end() :].strip()
+        # Keep the already-complete SQL if the model restarts with another "SQL:" segment.
+        if prefix and sql_start.match(prefix):
+            txt = prefix
+        elif suffix:
+            txt = suffix
+
+    # If the model emits repeated "SQL:" blocks, keep only the first segment.
+    txt = re.split(r"(?is)\bsql\s*:\s*", txt)[0].strip()
+
+    # Drop additional full-query restarts separated by semicolons.
+    parts = [p.strip() for p in txt.split(";") if p.strip()]
+    if len(parts) > 1 and sql_start.match(parts[0]) and sql_start.match(parts[1]):
+        txt = parts[0]
+
+    return txt.strip()
 
 
 def _normalize_sql(sql: str) -> str:

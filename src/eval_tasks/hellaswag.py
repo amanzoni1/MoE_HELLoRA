@@ -48,26 +48,91 @@ def _extract_pred_index(pred_text: str, endings) -> Optional[int]:
     if not pred_text:
         return None
 
-    up = pred_text.upper()
+    lines = [ln.strip() for ln in pred_text.splitlines() if ln.strip()]
+    first_line = lines[0] if lines else pred_text.strip()
 
-    # Preferred: direct option letter answer.
-    letter = re.search(r"\b([ABCD])\b", up)
+    def _line_to_choice(line: str) -> Optional[int]:
+        if not line:
+            return None
+        line = line.strip()
+        line = re.sub(r"(?i)^answer\s*[:\-]?\s*", "", line).strip()
+
+        # Direct single-token answers.
+        if re.fullmatch(r"[ABCD]", line, flags=re.IGNORECASE):
+            return OPTION_LETTERS.index(line.upper())
+        if re.fullmatch(r"[0-3]", line):
+            return int(line)
+
+        # Option-style prefixes, e.g. "B) ...", "2. ...".
+        m = re.match(r"^([ABCD])[\)\].:\-]\s*", line, flags=re.IGNORECASE)
+        if m:
+            return OPTION_LETTERS.index(m.group(1).upper())
+        m = re.match(r"^([0-3])[\)\].:\-]\s*", line)
+        if m:
+            return int(m.group(1))
+        return None
+
+    def _match_ending_from_text(text: str) -> Optional[int]:
+        t_norm = _normalize_text(text)
+        if not t_norm:
+            return None
+        best_idx = None
+        best_len = -1
+        for i, ending in enumerate(endings):
+            e_norm = _normalize_text(ending)
+            if not e_norm:
+                continue
+            if e_norm == t_norm or e_norm in t_norm or t_norm in e_norm:
+                if len(e_norm) > best_len:
+                    best_idx = i
+                    best_len = len(e_norm)
+        return best_idx
+
+    # Preferred: parse the first emitted line as answer.
+    idx = _line_to_choice(first_line)
+    if idx is not None:
+        return idx
+
+    # If the model outputs the ending text directly on the first line, use it.
+    idx = _match_ending_from_text(first_line)
+    if idx is not None:
+        return idx
+
+    # Secondary: explicit "Answer: X" anywhere.
+    answer_match = re.search(r"(?i)\banswer\s*[:\-]?\s*([ABCD]|[0-3])\b", pred_text)
+    if answer_match:
+        token = answer_match.group(1).upper()
+        if token in OPTION_LETTERS:
+            return OPTION_LETTERS.index(token)
+        return int(token)
+
+    # Tertiary: direct letter token in full output.
+    letter = re.search(r"\b([ABCD])\b", pred_text, flags=re.IGNORECASE)
     if letter:
-        return OPTION_LETTERS.index(letter.group(1))
+        return OPTION_LETTERS.index(letter.group(1).upper())
 
-    # Secondary: numeric option answer.
-    digit = re.search(r"\b([0-3])\b", pred_text)
-    if digit:
-        return int(digit.group(1))
+    # Numeric fallback only when it appears as a standalone answer-like line.
+    for line in lines[:3]:
+        idx = _line_to_choice(line)
+        if idx is not None:
+            return idx
 
     # Fallback: model emitted ending text instead of option id.
     pred_norm = _normalize_text(pred_text)
     best_idx = None
+    best_pos = None
     best_len = -1
     for idx, ending in enumerate(endings):
         ending_norm = _normalize_text(ending)
-        if ending_norm and ending_norm in pred_norm and len(ending_norm) > best_len:
+        if not ending_norm:
+            continue
+        pos = pred_norm.find(ending_norm)
+        if pos == -1:
+            continue
+        # Prefer earliest match (often the actual answer line), then longer text.
+        if best_pos is None or pos < best_pos or (pos == best_pos and len(ending_norm) > best_len):
             best_idx = idx
+            best_pos = pos
             best_len = len(ending_norm)
     return best_idx
 
