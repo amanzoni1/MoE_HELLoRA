@@ -1,4 +1,6 @@
-from typing import Optional
+import json
+import os
+from typing import Optional, List, Tuple, Dict
 from datasets import load_dataset
 
 
@@ -51,9 +53,202 @@ def fmt_mmlu(ex):
     ans_idx = ex["answer"]
     return f"Question: {ex['question']}\n{opts}\nAnswer: {labels[ans_idx]}"
 
+def _as_clean_str(v) -> str:
+    if v is None:
+        return ""
+    return str(v).strip()
+
+
+def _extract_table_names(ex) -> List[str]:
+    for key in ("table_names_original", "table_names", "db_table_names"):
+        v = ex.get(key)
+        if not isinstance(v, list) or not v:
+            continue
+        out = []
+        for item in v:
+            if isinstance(item, str):
+                out.append(item.strip())
+            elif isinstance(item, dict):
+                out.append(
+                    _as_clean_str(
+                        item.get("table_name_original")
+                        or item.get("table_name")
+                        or item.get("name")
+                    )
+                )
+            else:
+                out.append(_as_clean_str(item))
+        out = [x for x in out if x]
+        if out:
+            return out
+    return []
+
+
+def _extract_column_pairs(ex) -> List[Tuple[int, str]]:
+    for key in ("column_names_original", "column_names"):
+        v = ex.get(key)
+        if not isinstance(v, list) or not v:
+            continue
+        out: List[Tuple[int, str]] = []
+        for item in v:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                try:
+                    table_idx = int(item[0])
+                except Exception:
+                    table_idx = -1
+                col = _as_clean_str(item[1])
+                out.append((table_idx, col))
+            elif isinstance(item, dict):
+                raw_idx = item.get("table_id", item.get("table_idx", -1))
+                try:
+                    table_idx = int(raw_idx)
+                except Exception:
+                    table_idx = -1
+                col = _as_clean_str(
+                    item.get("column_name_original")
+                    or item.get("column_name")
+                    or item.get("name")
+                )
+                out.append((table_idx, col))
+        if out:
+            return out
+
+    # Alternate HF layout: {"table_id": [...], "column_name": [...]}
+    for key in ("db_column_names",):
+        v = ex.get(key)
+        if not isinstance(v, dict):
+            continue
+        table_ids = v.get("table_id", [])
+        col_names = v.get("column_name_original", v.get("column_name", []))
+        if isinstance(table_ids, list) and isinstance(col_names, list) and len(table_ids) == len(col_names):
+            out: List[Tuple[int, str]] = []
+            for tid, cn in zip(table_ids, col_names):
+                try:
+                    table_idx = int(tid)
+                except Exception:
+                    table_idx = -1
+                out.append((table_idx, _as_clean_str(cn)))
+            if out:
+                return out
+    return []
+
+
+def _schema_from_metadata(ex) -> str:
+    tables = _extract_table_names(ex)
+    col_pairs = _extract_column_pairs(ex)
+    if not tables or not col_pairs:
+        return ""
+
+    by_table: Dict[int, List[str]] = {i: [] for i in range(len(tables))}
+    for t_idx, col_name in col_pairs:
+        if t_idx < 0 or t_idx >= len(tables):
+            continue
+        if not col_name or col_name == "*":
+            continue
+        if col_name not in by_table[t_idx]:
+            by_table[t_idx].append(col_name)
+
+    lines = []
+    for i, t_name in enumerate(tables):
+        cols = by_table.get(i, [])
+        if cols:
+            lines.append(f"{t_name}({', '.join(cols)})")
+        else:
+            lines.append(f"{t_name}()")
+    return "\n".join(lines)
+
+
+_SPIDER_SCHEMA_BY_DB: Optional[Dict[str, str]] = None
+
+
+def _load_spider_schema_by_db() -> Dict[str, str]:
+    global _SPIDER_SCHEMA_BY_DB
+    if _SPIDER_SCHEMA_BY_DB is not None:
+        return _SPIDER_SCHEMA_BY_DB
+
+    _SPIDER_SCHEMA_BY_DB = {}
+    candidates = []
+    env_path = os.environ.get("SPIDER_TABLES_JSON")
+    if env_path:
+        candidates.append(env_path)
+    candidates.extend(
+        [
+            "/workspace/test-suite-sql-eval/tables.json",
+            os.path.join(os.getcwd(), "test-suite-sql-eval", "tables.json"),
+            os.path.join(os.getcwd(), "tables.json"),
+        ]
+    )
+
+    for path in candidates:
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, list):
+                continue
+            for obj in payload:
+                if not isinstance(obj, dict):
+                    continue
+                db_id = _as_clean_str(obj.get("db_id"))
+                if not db_id:
+                    continue
+                schema = _schema_from_metadata(obj)
+                if schema:
+                    _SPIDER_SCHEMA_BY_DB[db_id] = schema
+            if _SPIDER_SCHEMA_BY_DB:
+                break
+        except Exception:
+            continue
+    return _SPIDER_SCHEMA_BY_DB
+
+
+def build_spider_schema_text(ex) -> str:
+    """
+    Build a compact schema string from Spider example metadata.
+    Falls back to empty string when schema metadata is unavailable.
+    """
+    # Prefer pre-built schema string if dataset already provides one.
+    raw_schema = ex.get("schema")
+    if isinstance(raw_schema, str) and raw_schema.strip():
+        return raw_schema.strip()
+
+    schema = _schema_from_metadata(ex)
+    if schema:
+        return schema
+
+    db_id = _as_clean_str(ex.get("db_id"))
+    if not db_id:
+        return ""
+    return _load_spider_schema_by_db().get(db_id, "")
+
+
+def build_spider_prompt(question: str, schema_text: str, sql_answer: Optional[str] = None) -> str:
+    """
+    Shared Spider prompt template used by both training and eval.
+    """
+    parts = [
+        "You are a SQLite SQL expert.",
+        "Given the database schema, write a SQL query that answers the question.",
+    ]
+    if schema_text:
+        parts += ["", "Schema:", schema_text]
+    parts += [
+        "",
+        f"Question: {question}",
+        "Return only SQL.",
+    ]
+    if sql_answer is None:
+        parts.append("SQL:")
+    else:
+        parts.append(f"SQL: {sql_answer}")
+    return "\n".join(parts)
+
+
 def fmt_spider(ex):
-    """Spider: natural language question → SQL query."""
-    return f"Question: {ex['question']}\nSQL: {ex['query']}"
+    """Spider: schema-grounded text-to-SQL formatting."""
+    schema_text = build_spider_schema_text(ex)
+    return build_spider_prompt(ex["question"], schema_text, sql_answer=ex["query"])
 
 
 # ═══════════════════════════════════════════════════════════════════

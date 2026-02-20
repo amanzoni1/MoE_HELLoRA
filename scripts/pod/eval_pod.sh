@@ -23,6 +23,15 @@ PIP_INSTALL=1
 ADAPTER_TEMPLATE=""
 FULL_ADAPTER_TEMPLATE=""
 EXTRA_EVAL_ARGS=()
+SPIDER_OFFICIAL=0
+TS_EVAL_REPO="/workspace/test-suite-sql-eval"
+TS_DB_DIR=""
+TS_TABLE=""
+TS_ETYPE="exec"
+TS_TIMEOUT_SEC="0"
+TS_PLUG_VALUE=0
+TS_KEEP_DISTINCT=0
+TS_PROGRESS_BAR=0
 
 usage() {
   cat <<EOF
@@ -47,6 +56,15 @@ Options:
   --no-cleanup-merge            Keep merged model dirs
   --no-wandb                    Disable W&B logging
   --no-pip-install              Skip dependency install
+  --spider-official             Enable Spider official test-suite eval integration
+  --ts-eval-repo <path>         test-suite-sql-eval repo path (default: ${TS_EVAL_REPO})
+  --ts-db-dir <path>            Optional database dir override
+  --ts-table <path>             Optional tables.json path override
+  --ts-etype <exec|match|all>   Official eval mode (default: ${TS_ETYPE})
+  --ts-timeout-sec <int>        Timeout passed to scripts.eval Spider wrapper (default: ${TS_TIMEOUT_SEC})
+  --ts-plug-value               Pass --plug_value to official evaluator
+  --ts-keep-distinct            Pass --keep_distinct to official evaluator
+  --ts-progress-bar             Pass --progress_bar_for_each_datapoint to official evaluator
   -h, --help                    Show this message
 EOF
 }
@@ -72,6 +90,15 @@ while [[ $# -gt 0 ]]; do
     --no-cleanup-merge) CLEANUP_MERGE=0; shift ;;
     --no-wandb) USE_WANDB=0; shift ;;
     --no-pip-install) PIP_INSTALL=0; shift ;;
+    --spider-official) SPIDER_OFFICIAL=1; shift ;;
+    --ts-eval-repo) TS_EVAL_REPO="$2"; shift 2 ;;
+    --ts-db-dir) TS_DB_DIR="$2"; shift 2 ;;
+    --ts-table) TS_TABLE="$2"; shift 2 ;;
+    --ts-etype) TS_ETYPE="$2"; shift 2 ;;
+    --ts-timeout-sec) TS_TIMEOUT_SEC="$2"; shift 2 ;;
+    --ts-plug-value) TS_PLUG_VALUE=1; shift ;;
+    --ts-keep-distinct) TS_KEEP_DISTINCT=1; shift ;;
+    --ts-progress-bar) TS_PROGRESS_BAR=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; EXTRA_EVAL_ARGS=("$@"); break ;;
     *) die "Unknown argument: $1" ;;
@@ -83,6 +110,23 @@ cd "$REPO_ROOT"
 if [[ "$PIP_INSTALL" -eq 1 ]]; then
   log "Installing eval dependencies..."
   install_eval_deps
+fi
+
+if [[ "$SPIDER_OFFICIAL" -eq 1 ]]; then
+  if [[ "$TASK" != "spider" ]]; then
+    die "--spider-official can only be used with --task spider"
+  fi
+  if [[ "$PIP_INSTALL" -eq 1 ]]; then
+    python3 -m pip install --no-cache-dir -U sqlparse nltk
+    python3 - <<'PY'
+import nltk
+nltk.download("punkt")
+nltk.download("punkt_tab")
+print("NLTK punkt assets ready.")
+PY
+  else
+    log "Skipping Spider official deps install (--no-pip-install). Ensure sqlparse/nltk + punkt are already installed."
+  fi
 fi
 
 setup_cache_dirs
@@ -105,6 +149,25 @@ if [[ -z "$ADAPTER_TEMPLATE" ]]; then
 fi
 if [[ -z "$FULL_ADAPTER_TEMPLATE" ]]; then
   FULL_ADAPTER_TEMPLATE="AManzoni/${MODEL_TAG}_${TASK}_s{seed}_full_lora"
+fi
+
+if [[ "$SPIDER_OFFICIAL" -eq 1 ]]; then
+  EXTRA_EVAL_ARGS+=(--ts_run_official --ts_eval_repo "$TS_EVAL_REPO" --ts_etype "$TS_ETYPE" --ts_timeout_sec "$TS_TIMEOUT_SEC")
+  if [[ -n "$TS_DB_DIR" ]]; then
+    EXTRA_EVAL_ARGS+=(--ts_db_dir "$TS_DB_DIR")
+  fi
+  if [[ -n "$TS_TABLE" ]]; then
+    EXTRA_EVAL_ARGS+=(--ts_table "$TS_TABLE")
+  fi
+  if [[ "$TS_PLUG_VALUE" -eq 1 ]]; then
+    EXTRA_EVAL_ARGS+=(--ts_plug_value)
+  fi
+  if [[ "$TS_KEEP_DISTINCT" -eq 1 ]]; then
+    EXTRA_EVAL_ARGS+=(--ts_keep_distinct)
+  fi
+  if [[ "$TS_PROGRESS_BAR" -eq 1 ]]; then
+    EXTRA_EVAL_ARGS+=(--ts_progress_bar)
+  fi
 fi
 
 split_csv "$MODEL_SEEDS_CSV" MODEL_SEEDS

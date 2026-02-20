@@ -12,16 +12,11 @@ try:
 except ImportError:
     wandb = None
 
-from ..data_registry import EVAL_DATASETS
+from ..data_registry import EVAL_DATASETS, build_spider_schema_text, build_spider_prompt
 
 
-def _build_prompt(question: str) -> str:
-    return (
-        "Write a SQL query for the following question.\n"
-        "Return only the SQL query.\n"
-        f"Question: {question}\n"
-        "SQL:"
-    )
+def _build_prompt(question: str, schema_text: str) -> str:
+    return build_spider_prompt(question=question, schema_text=schema_text, sql_answer=None)
 
 
 def _extract_sql(pred_text: str) -> str:
@@ -127,8 +122,8 @@ def add_args(parser):
     parser.add_argument(
         "--ts_etype",
         choices=["exec", "match", "all"],
-        default="all",
-        help="Official evaluator type (default: all).",
+        default="exec",
+        help="Official evaluator type (default: exec).",
     )
     parser.add_argument(
         "--ts_plug_value",
@@ -144,6 +139,12 @@ def add_args(parser):
         "--ts_progress_bar",
         action="store_true",
         help="Pass --progress_bar_for_each_datapoint to official evaluator.",
+    )
+    parser.add_argument(
+        "--ts_timeout_sec",
+        type=int,
+        default=0,
+        help="Optional timeout in seconds for official evaluator (0 disables timeout).",
     )
 
 
@@ -193,14 +194,24 @@ def _run_official_test_suite_eval(args, gold_txt: str, pred_txt: str):
 
     print("[Spider] Running official evaluator:")
     print("  " + " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-
-    return {
-        "command": cmd,
-        "return_code": proc.returncode,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
-    }
+    timeout_sec = args.ts_timeout_sec if args.ts_timeout_sec and args.ts_timeout_sec > 0 else None
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout_sec)
+        return {
+            "command": cmd,
+            "return_code": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "timed_out": False,
+        }
+    except subprocess.TimeoutExpired as e:
+        return {
+            "command": cmd,
+            "return_code": 124,
+            "stdout": (e.stdout or ""),
+            "stderr": ((e.stderr or "") + f"\n[timeout] official eval exceeded {timeout_sec}s"),
+            "timed_out": True,
+        }
 
 
 def _to_fraction(v: float):
@@ -269,8 +280,12 @@ def load_data(args):
     if args.n:
         ds = ds.select(range(min(args.n, len(ds))))
 
-    prompts = [_build_prompt(q) for q in ds["question"]]
-    golds = ds["query"]
+    prompts = []
+    golds = []
+    for ex in ds:
+        schema_text = build_spider_schema_text(ex)
+        prompts.append(_build_prompt(ex["question"], schema_text))
+        golds.append(ex["query"])
     return ds, prompts, golds
 
 
@@ -384,7 +399,7 @@ def score_and_save(args, ds, prompts, golds, outputs):
             "acc = normalized string exact match (proxy). "
             "For official Test Suite Accuracy run: "
             "cd test-suite-sql-eval && python3 evaluation.py "
-            f"--gold {gold_txt_abs} --pred {pred_txt_abs} --db database/ --table tables.json --etype all"
+            f"--gold {gold_txt_abs} --pred {pred_txt_abs} --db database/ --table tables.json --etype {args.ts_etype}"
         ),
         "predictions_jsonl": out_file,
         "ts_inputs_dir": ts_dir_abs,
@@ -414,7 +429,7 @@ def score_and_save(args, ds, prompts, golds, outputs):
         f"    --pred {pred_txt_abs} \\\n"
         f"    --db   database/ \\\n"
         f"    --table tables.json \\\n"
-        f"    --etype all"
+        f"    --etype {args.ts_etype}"
     )
 
     if args.wandb and wandb:
