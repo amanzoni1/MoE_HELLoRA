@@ -12,11 +12,12 @@ try:
 except ImportError:
     wandb = None
 
-from ..data_registry import EVAL_DATASETS, build_spider_schema_text, build_spider_prompt
-
-
-def _build_prompt(question: str, schema_text: str) -> str:
-    return build_spider_prompt(question=question, schema_text=schema_text, sql_answer=None)
+from ..data_registry import (
+    EVAL_DATASETS,
+    build_spider_schema_text,
+    build_spider_prompt,
+    validate_spider_schema_or_raise,
+)
 
 
 def _extract_sql(pred_text: str) -> str:
@@ -280,11 +281,17 @@ def load_data(args):
     if args.n:
         ds = ds.select(range(min(args.n, len(ds))))
 
+    validate_spider_schema_or_raise(
+        ds,
+        context=f"Spider eval split='{ds_cfg['split']}'",
+        max_examples=min(256, len(ds)),
+    )
+
     prompts = []
     golds = []
     for ex in ds:
         schema_text = build_spider_schema_text(ex)
-        prompts.append(_build_prompt(ex["question"], schema_text))
+        prompts.append(build_spider_prompt(ex["question"], schema_text, sql_answer=None))
         golds.append(ex["query"])
     return ds, prompts, golds
 

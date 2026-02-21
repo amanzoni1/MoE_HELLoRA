@@ -116,20 +116,20 @@ if [[ "$SPIDER_OFFICIAL" -eq 1 ]]; then
   if [[ "$TASK" != "spider" ]]; then
     die "--spider-official can only be used with --task spider"
   fi
-  if [[ "$PIP_INSTALL" -eq 1 ]]; then
-    python3 -m pip install --no-cache-dir -U sqlparse nltk
-    python3 - <<'PY'
-import nltk
-nltk.download("punkt")
-nltk.download("punkt_tab")
-print("NLTK punkt assets ready.")
-PY
-  else
-    log "Skipping Spider official deps install (--no-pip-install). Ensure sqlparse/nltk + punkt are already installed."
-  fi
 fi
 
 setup_cache_dirs
+
+if [[ "$TASK" == "spider" ]]; then
+  if [[ "$SPIDER_OFFICIAL" -eq 1 ]]; then
+    log "Preparing full Spider official-eval assets..."
+    setup_spider_assets "$TS_EVAL_REPO" 1 1
+  else
+    log "Preparing Spider schema assets for prompt formatting..."
+    setup_spider_assets "$TS_EVAL_REPO" 0 0
+  fi
+fi
+
 if ! hf_login_if_token; then
   log "HF_TOKEN not set; using unauthenticated HF access."
 fi

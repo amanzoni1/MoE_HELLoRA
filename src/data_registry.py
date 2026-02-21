@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Optional, List, Tuple, Dict
+from typing import Any, Dict, Iterable, List, Optional
 from datasets import load_dataset
 
 
@@ -59,114 +59,59 @@ def _as_clean_str(v) -> str:
     return str(v).strip()
 
 
-def _extract_table_names(ex) -> List[str]:
-    for key in ("table_names_original", "table_names", "db_table_names"):
-        v = ex.get(key)
-        if not isinstance(v, list) or not v:
-            continue
-        out = []
-        for item in v:
-            if isinstance(item, str):
-                out.append(item.strip())
-            elif isinstance(item, dict):
-                out.append(
-                    _as_clean_str(
-                        item.get("table_name_original")
-                        or item.get("table_name")
-                        or item.get("name")
-                    )
-                )
-            else:
-                out.append(_as_clean_str(item))
-        out = [x for x in out if x]
-        if out:
-            return out
-    return []
+def _build_compact_schema(table_names: list, column_names: list) -> str:
+    if not isinstance(table_names, list) or not isinstance(column_names, list):
+        return ""
+    if not table_names or not column_names:
+        return ""
 
-
-def _extract_column_pairs(ex) -> List[Tuple[int, str]]:
-    for key in ("column_names_original", "column_names"):
-        v = ex.get(key)
-        if not isinstance(v, list) or not v:
-            continue
-        out: List[Tuple[int, str]] = []
-        for item in v:
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
-                try:
-                    table_idx = int(item[0])
-                except Exception:
-                    table_idx = -1
-                col = _as_clean_str(item[1])
-                out.append((table_idx, col))
-            elif isinstance(item, dict):
-                raw_idx = item.get("table_id", item.get("table_idx", -1))
-                try:
-                    table_idx = int(raw_idx)
-                except Exception:
-                    table_idx = -1
-                col = _as_clean_str(
-                    item.get("column_name_original")
-                    or item.get("column_name")
-                    or item.get("name")
-                )
-                out.append((table_idx, col))
-        if out:
-            return out
-
-    # Alternate HF layout: {"table_id": [...], "column_name": [...]}
-    for key in ("db_column_names",):
-        v = ex.get(key)
-        if not isinstance(v, dict):
-            continue
-        table_ids = v.get("table_id", [])
-        col_names = v.get("column_name_original", v.get("column_name", []))
-        if isinstance(table_ids, list) and isinstance(col_names, list) and len(table_ids) == len(col_names):
-            out: List[Tuple[int, str]] = []
-            for tid, cn in zip(table_ids, col_names):
-                try:
-                    table_idx = int(tid)
-                except Exception:
-                    table_idx = -1
-                out.append((table_idx, _as_clean_str(cn)))
-            if out:
-                return out
-    return []
-
-
-def _schema_from_metadata(ex) -> str:
-    tables = _extract_table_names(ex)
-    col_pairs = _extract_column_pairs(ex)
-    if not tables or not col_pairs:
+    tables = [_as_clean_str(t) for t in table_names]
+    if not any(tables):
         return ""
 
     by_table: Dict[int, List[str]] = {i: [] for i in range(len(tables))}
-    for t_idx, col_name in col_pairs:
-        if t_idx < 0 or t_idx >= len(tables):
+    for pair in column_names:
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
             continue
+        try:
+            table_idx = int(pair[0])
+        except Exception:
+            continue
+
+        if table_idx < 0 or table_idx >= len(tables):
+            continue
+
+        col_name = _as_clean_str(pair[1])
         if not col_name or col_name == "*":
             continue
-        if col_name not in by_table[t_idx]:
-            by_table[t_idx].append(col_name)
+        if col_name not in by_table[table_idx]:
+            by_table[table_idx].append(col_name)
 
-    lines = []
-    for i, t_name in enumerate(tables):
-        cols = by_table.get(i, [])
+    lines: List[str] = []
+    for idx, table in enumerate(tables):
+        if not table:
+            continue
+        cols = by_table[idx]
         if cols:
-            lines.append(f"{t_name}({', '.join(cols)})")
+            lines.append(f"{table}({', '.join(cols)})")
         else:
-            lines.append(f"{t_name}()")
+            lines.append(f"{table}()")
     return "\n".join(lines)
 
 
+def _schema_from_spider_obj(obj) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    table_names = obj.get("table_names_original") or obj.get("table_names")
+    column_names = obj.get("column_names_original") or obj.get("column_names")
+    return _build_compact_schema(table_names, column_names)
+
+
 _SPIDER_SCHEMA_BY_DB: Optional[Dict[str, str]] = None
+_SPIDER_SCHEMA_CACHE_KEY: Optional[tuple] = None
 
 
-def _load_spider_schema_by_db() -> Dict[str, str]:
-    global _SPIDER_SCHEMA_BY_DB
-    if _SPIDER_SCHEMA_BY_DB is not None:
-        return _SPIDER_SCHEMA_BY_DB
-
-    _SPIDER_SCHEMA_BY_DB = {}
+def spider_tables_json_candidates() -> List[str]:
     candidates = []
     env_path = os.environ.get("SPIDER_TABLES_JSON")
     if env_path:
@@ -178,7 +123,28 @@ def _load_spider_schema_by_db() -> Dict[str, str]:
             os.path.join(os.getcwd(), "tables.json"),
         ]
     )
+    return candidates
 
+
+def _spider_schema_cache_key(candidates: List[str]) -> tuple:
+    keyed = []
+    for path in candidates:
+        exists = os.path.isfile(path)
+        mtime = os.path.getmtime(path) if exists else None
+        keyed.append((path, exists, mtime))
+    return tuple(keyed)
+
+
+def _load_spider_schema_by_db() -> Dict[str, str]:
+    global _SPIDER_SCHEMA_BY_DB, _SPIDER_SCHEMA_CACHE_KEY
+    candidates = spider_tables_json_candidates()
+    cache_key = _spider_schema_cache_key(candidates)
+
+    if _SPIDER_SCHEMA_BY_DB is not None and cache_key == _SPIDER_SCHEMA_CACHE_KEY:
+        return _SPIDER_SCHEMA_BY_DB
+
+    _SPIDER_SCHEMA_BY_DB = {}
+    _SPIDER_SCHEMA_CACHE_KEY = cache_key
     for path in candidates:
         if not path or not os.path.isfile(path):
             continue
@@ -193,7 +159,7 @@ def _load_spider_schema_by_db() -> Dict[str, str]:
                 db_id = _as_clean_str(obj.get("db_id"))
                 if not db_id:
                     continue
-                schema = _schema_from_metadata(obj)
+                schema = _schema_from_spider_obj(obj)
                 if schema:
                     _SPIDER_SCHEMA_BY_DB[db_id] = schema
             if _SPIDER_SCHEMA_BY_DB:
@@ -208,12 +174,11 @@ def build_spider_schema_text(ex) -> str:
     Build a compact schema string from Spider example metadata.
     Falls back to empty string when schema metadata is unavailable.
     """
-    # Prefer pre-built schema string if dataset already provides one.
     raw_schema = ex.get("schema")
     if isinstance(raw_schema, str) and raw_schema.strip():
         return raw_schema.strip()
 
-    schema = _schema_from_metadata(ex)
+    schema = _schema_from_spider_obj(ex)
     if schema:
         return schema
 
@@ -227,12 +192,18 @@ def build_spider_prompt(question: str, schema_text: str, sql_answer: Optional[st
     """
     Shared Spider prompt template used by both training and eval.
     """
+    schema = _as_clean_str(schema_text)
+    if not schema:
+        raise ValueError(
+            "Spider schema is required but missing. "
+            "Set SPIDER_TABLES_JSON or place tables.json in test-suite-sql-eval."
+        )
+
     parts = [
         "You are a SQLite SQL expert.",
         "Given the database schema, write a SQL query that answers the question.",
     ]
-    if schema_text:
-        parts += ["", "Schema:", schema_text]
+    parts += ["", "Schema:", schema]
     parts += [
         "",
         f"Question: {question}",
@@ -243,6 +214,40 @@ def build_spider_prompt(question: str, schema_text: str, sql_answer: Optional[st
     else:
         parts.append(f"SQL: {sql_answer}")
     return "\n".join(parts)
+
+
+def validate_spider_schema_or_raise(
+    examples: Iterable[Dict[str, Any]],
+    *,
+    context: str = "Spider",
+    max_examples: Optional[int] = None,
+) -> None:
+    checked = 0
+    missing = 0
+    missing_db_ids: List[str] = []
+    seen_ids = set()
+
+    for ex in examples:
+        schema = build_spider_schema_text(ex)
+        checked += 1
+        if not schema:
+            missing += 1
+            db_id = _as_clean_str(ex.get("db_id"))
+            if db_id and db_id not in seen_ids and len(missing_db_ids) < 8:
+                seen_ids.add(db_id)
+                missing_db_ids.append(db_id)
+        if max_examples is not None and checked >= max_examples:
+            break
+
+    if missing > 0:
+        sample = ", ".join(missing_db_ids) if missing_db_ids else "unknown"
+        candidates = "\n".join(f"  - {p}" for p in spider_tables_json_candidates())
+        raise ValueError(
+            f"{context}: missing schema for {missing}/{checked} example(s). "
+            f"Sample db_id(s): {sample}\n"
+            "Set SPIDER_TABLES_JSON or place tables.json in one of:\n"
+            f"{candidates}"
+        )
 
 
 def fmt_spider(ex):
@@ -387,6 +392,13 @@ def load_and_format_dataset(
 
     if n_samples:
         ds = ds.select(range(min(n_samples, len(ds))))
+
+    if key == "spider":
+        validate_spider_schema_or_raise(
+            ds,
+            context=f"Spider training split='{cfg['split']}'",
+            max_examples=min(256, len(ds)),
+        )
 
     fn = cfg["text_fn"]
 

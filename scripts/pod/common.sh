@@ -37,6 +37,7 @@ install_train_deps() {
     "accelerate==1.12.0" \
     "peft==0.18.1" \
     datasets \
+    gdown \
     wandb \
     huggingface_hub
 }
@@ -49,9 +50,58 @@ install_eval_deps() {
     peft \
     accelerate \
     bitsandbytes \
+    gdown \
+    sqlparse \
+    nltk \
     wandb \
     vllm \
     huggingface_hub
+}
+
+setup_spider_assets() {
+  local ts_repo="${1:-/workspace/test-suite-sql-eval}"
+  local need_database="${2:-0}"
+  local need_nltk="${3:-0}"
+  local tables_json="${ts_repo}/tables.json"
+  local db_dir="${ts_repo}/database"
+
+  if [[ ! -d "$ts_repo" ]]; then
+    log "Cloning Spider test-suite evaluator into $ts_repo ..."
+    git clone https://github.com/taoyds/test-suite-sql-eval.git "$ts_repo"
+  fi
+
+  [[ -f "${ts_repo}/evaluation.py" ]] || die "Missing ${ts_repo}/evaluation.py"
+
+  if [[ ! -f "$tables_json" ]]; then
+    command -v gdown >/dev/null 2>&1 || die "gdown is required to fetch Spider tables.json. Install deps or pass --no-pip-install only if assets already exist."
+    log "Downloading Spider tables.json ..."
+    gdown --fuzzy "https://drive.google.com/file/d/1403EGqzIDoHMdQF4c9Bkyl7dZLZ5Wt6J/view?usp=sharing" -O /tmp/spider_data.zip
+    rm -rf /tmp/spider_data
+    mkdir -p /tmp/spider_data
+    python3 -m zipfile -e /tmp/spider_data.zip /tmp/spider_data
+    cp /tmp/spider_data/spider/tables.json "$tables_json"
+  fi
+
+  if [[ "$need_database" -eq 1 ]]; then
+    if [[ ! -d "$db_dir" ]] || [[ -z "$(ls -A "$db_dir" 2>/dev/null || true)" ]]; then
+      command -v gdown >/dev/null 2>&1 || die "gdown is required to fetch Spider test-suite databases. Install deps or provide assets manually."
+      log "Downloading Spider official test-suite databases ..."
+      gdown --fuzzy "https://drive.google.com/file/d/1mkCx2GOFIqNesD4y8TDAO1yX1QZORP5w/view?usp=sharing" -O /tmp/testsuitedatabases.zip
+      python3 -m zipfile -e /tmp/testsuitedatabases.zip "$ts_repo"
+    fi
+  fi
+
+  if [[ "$need_nltk" -eq 1 ]]; then
+    python3 - <<'PY'
+import nltk
+nltk.download("punkt")
+nltk.download("punkt_tab")
+print("NLTK punkt assets ready.")
+PY
+  fi
+
+  export SPIDER_TABLES_JSON="$tables_json"
+  log "Spider schema source: $SPIDER_TABLES_JSON"
 }
 
 hf_login_if_token() {

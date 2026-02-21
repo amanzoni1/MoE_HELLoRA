@@ -21,6 +21,8 @@ PUSH_TO_HUB=1
 CLEANUP_AFTER_PUSH=1
 USE_WANDB=1
 HUB_REPO_PREFIX=""
+SPIDER_SCHEMA_AUTO=1
+SPIDER_TS_REPO="/workspace/test-suite-sql-eval"
 EXTRA_RUN_ARGS=()
 
 usage() {
@@ -45,6 +47,8 @@ Options:
   --no-cleanup                  Do not pass --cleanup_after_push
   --no-wandb                    Pass --no_wandb
   --hub-repo-prefix <prefix>    Optional repo prefix per run (e.g. myexp_)
+  --no-spider-schema-auto       Disable automatic Spider schema setup
+  --spider-ts-repo <path>       Spider test-suite repo path (default: ${SPIDER_TS_REPO})
   -h, --help                    Show this message
 EOF
 }
@@ -68,6 +72,8 @@ while [[ $# -gt 0 ]]; do
     --no-cleanup) CLEANUP_AFTER_PUSH=0; shift ;;
     --no-wandb) USE_WANDB=0; shift ;;
     --hub-repo-prefix) HUB_REPO_PREFIX="$2"; shift 2 ;;
+    --no-spider-schema-auto) SPIDER_SCHEMA_AUTO=0; shift ;;
+    --spider-ts-repo) SPIDER_TS_REPO="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; EXTRA_RUN_ARGS=("$@"); break ;;
     *) die "Unknown argument: $1" ;;
@@ -84,6 +90,11 @@ if [[ "$PIP_INSTALL" -eq 1 ]]; then
 fi
 
 setup_cache_dirs
+
+if [[ "$TASK" == "spider" ]] && [[ "$SPIDER_SCHEMA_AUTO" -eq 1 ]]; then
+  log "Preparing Spider schema assets for training..."
+  setup_spider_assets "$SPIDER_TS_REPO" 0 0
+fi
 
 if ! hf_login_if_token; then
   if [[ "$PUSH_TO_HUB" -eq 1 ]]; then
