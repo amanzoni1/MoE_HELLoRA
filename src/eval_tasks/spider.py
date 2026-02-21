@@ -236,6 +236,28 @@ def _parse_official_metrics(stdout: str):
     parsed = {}
     lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
 
+    # Prefer Spider official table parse when available:
+    # execution  <easy> <medium> <hard> <extra> <all>
+    exec_row = re.search(
+        r"(?im)^\s*execution\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)\s*$",
+        stdout,
+    )
+    if exec_row:
+        by_bucket = {
+            "easy": _to_fraction(float(exec_row.group(1))),
+            "medium": _to_fraction(float(exec_row.group(2))),
+            "hard": _to_fraction(float(exec_row.group(3))),
+            "extra": _to_fraction(float(exec_row.group(4))),
+            "all": _to_fraction(float(exec_row.group(5))),
+        }
+        for k, v in by_bucket.items():
+            if v is not None:
+                parsed[f"official_exec_acc_{k}"] = v
+        # Headline metric should be the all-column, not the easy-column.
+        if by_bucket["all"] is not None:
+            parsed["official_exec_acc"] = by_bucket["all"]
+            parsed["official_test_suite_acc"] = by_bucket["all"]
+
     patterns = [
         ("official_test_suite_acc", r"(?i)test[- ]?suite(?:\s+execution(?:\s+accuracy)?)?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*%?"),
         ("official_exec_acc", r"(?i)\bexecution(?:\s+accuracy)?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*%?"),
