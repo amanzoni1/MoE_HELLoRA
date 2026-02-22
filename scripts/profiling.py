@@ -48,6 +48,20 @@ def main():
     parser.add_argument("--data_seed", type=int, default=None,
                         help="Dataset shuffle seed (default: uses --seed)")
     parser.add_argument("--run_name", type=str, default="default", help="Tag for output file")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=TRAIN_CFG.model_id,
+        help=f"HF model id to profile (default: {TRAIN_CFG.model_id})",
+    )
+    parser.add_argument(
+        "--gate_path",
+        type=str,
+        default=None,
+        help="Optional gate module path per layer (e.g., mlp.gate, block_sparse_moe.gate)",
+    )
+    parser.add_argument("--num_experts", type=int, default=None, help="Optional override for router expert count")
+    parser.add_argument("--top_k", type=int, default=None, help="Optional override for experts selected per token")
     parser.add_argument("--fail_fast", action="store_true",
                         help="Stop immediately if one dataset fails")
     args = parser.parse_args()
@@ -59,14 +73,14 @@ def main():
         tasks = args.task
 
     # Load model once
-    print(f"Loading model {TRAIN_CFG.model_id}...")
+    print(f"Loading model {args.model}...")
     model = AutoModelForCausalLM.from_pretrained(
-        TRAIN_CFG.model_id,
+        args.model,
         torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )
-    tokenizer = AutoTokenizer.from_pretrained(TRAIN_CFG.model_id, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -89,6 +103,9 @@ def main():
                 seed=args.seed,
                 data_seed=args.data_seed,
                 run_name=args.run_name,
+                gate_path=args.gate_path,
+                num_experts=args.num_experts,
+                top_k=args.top_k,
             )
             elapsed = time.time() - t0
             results[task] = {"status": "ok", "file": pt_file, "time": elapsed}
@@ -113,11 +130,14 @@ def main():
     ts = time.strftime("%Y%m%d_%H%M%S")
     manifest_path = os.path.join(telemetry_root, f"profile_run_{safe_run_name}_{ts}.json")
     manifest = {
-        "model_id": TRAIN_CFG.model_id,
+        "model_id": args.model,
         "seed": args.seed,
         "data_seed": args.data_seed,
         "n_samples": args.n_samples,
         "batch_size": args.bs,
+        "gate_path": args.gate_path,
+        "num_experts": args.num_experts,
+        "top_k": args.top_k,
         "split_override": args.split,
         "tasks": tasks,
         "results": results,

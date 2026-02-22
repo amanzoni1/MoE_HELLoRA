@@ -25,6 +25,7 @@ class ProfilerEngine:
         seq_len: int = 2048,
         bucket_edges: Optional[List[int]] = None,
         gate_getter: Optional[Callable[[Any], Any]] = None,
+        gate_path: Optional[str] = None,
         num_experts: Optional[int] = None,
         top_k: Optional[int] = None,
         store_mass: bool = True,
@@ -45,8 +46,59 @@ class ProfilerEngine:
             raise ValueError("Could not automatically identify model layers.")
 
         self.num_layers = len(self.layers)
-        self.num_experts = int(num_experts or getattr(model.config, "num_experts", 64))
-        self.top_k = int(top_k or getattr(model.config, "num_experts_per_tok", 8))
+        self.gate_path = gate_path
+
+        # Gate module resolution
+        if gate_getter is not None:
+            self.gate_getter = gate_getter
+        else:
+            self.gate_path = self.gate_path or self._auto_detect_gate_path(self.layers[0])
+            self.gate_getter = lambda layer: self._resolve_attr_path(layer, self.gate_path)
+
+        first_gate = self.gate_getter(self.layers[0])
+        gate_out_features = getattr(first_gate, "out_features", None)
+
+        # Router cardinality (experts)
+        cfg_experts = self._get_config_first_int(
+            ["num_experts", "num_local_experts", "n_routed_experts", "n_experts"]
+        )
+        if num_experts is not None:
+            self.num_experts = int(num_experts)
+        elif cfg_experts is not None:
+            self.num_experts = int(cfg_experts)
+        elif gate_out_features is not None:
+            self.num_experts = int(gate_out_features)
+        else:
+            raise ValueError(
+                "Could not infer num_experts from model config or gate module. "
+                "Pass num_experts explicitly."
+            )
+
+        # Experts selected per token (top-k)
+        cfg_top_k = self._get_config_first_int(
+            [
+                "num_experts_per_tok",
+                "num_experts_per_token",
+                "num_selected_experts",
+                "moe_top_k",
+                "router_topk",
+                "top_k",
+                "num_selects",
+            ]
+        )
+        if top_k is not None:
+            self.top_k = int(top_k)
+        elif cfg_top_k is not None:
+            self.top_k = int(cfg_top_k)
+        else:
+            # Conservative fallback for unsupported configs.
+            self.top_k = min(8, self.num_experts)
+
+        if self.top_k <= 0 or self.top_k > self.num_experts:
+            raise ValueError(
+                f"Invalid top_k={self.top_k} for num_experts={self.num_experts}. "
+                "Pass --top_k/--num_experts explicitly."
+            )
 
         self.store_mass = bool(store_mass)
         self.prob_dtype = prob_dtype
@@ -71,18 +123,77 @@ class ProfilerEngine:
         self.hooks = []
         self.data_buffer: Dict[int, Dict[str, Any]] = {}
 
-        # Default OLMoE gate path
-        self.gate_getter = gate_getter or (lambda layer: layer.mlp.gate)
-
         # NEW: auto-detect renorm_topk_prob (affects mass only, not indices)
         if renorm_topk_prob is None:
             try:
-                renorm_topk_prob = bool(getattr(self.layers[0].mlp, "norm_topk_prob", False))
+                mlp = getattr(self.layers[0], "mlp", None)
+                renorm_topk_prob = bool(getattr(mlp, "norm_topk_prob", False))
             except Exception:
                 renorm_topk_prob = False
         self.renorm_topk_prob = bool(renorm_topk_prob)
 
+        print(
+            f"[Profiler] gate_path={self.gate_path or '<custom_getter>'} "
+            f"num_experts={self.num_experts} top_k={self.top_k}"
+        )
         os.makedirs(self.output_dir, exist_ok=True)
+
+    def _resolve_attr_path(self, obj: Any, path: str) -> Any:
+        cur = obj
+        for part in path.split("."):
+            if not part:
+                continue
+            if part.isdigit():
+                idx = int(part)
+                cur = cur[idx]
+                continue
+            if not hasattr(cur, part):
+                raise AttributeError(f"Path '{path}' not found at '{part}'")
+            cur = getattr(cur, part)
+        return cur
+
+    def _auto_detect_gate_path(self, first_layer: Any) -> str:
+        # Common gate locations across OLMoE/Mixtral-like implementations.
+        candidates = [
+            "mlp.gate",
+            "block_sparse_moe.gate",
+            "block_sparse_moe.router",
+            "moe.gate",
+            "router.gate",
+            "router",
+        ]
+        for path in candidates:
+            try:
+                mod = self._resolve_attr_path(first_layer, path)
+                if hasattr(mod, "register_forward_hook"):
+                    return path
+            except Exception:
+                continue
+
+        # Fallback scan by name.
+        for name, mod in first_layer.named_modules():
+            lname = name.lower()
+            if not lname:
+                continue
+            if ("gate" in lname or "router" in lname) and hasattr(mod, "register_forward_hook"):
+                return name
+
+        raise ValueError(
+            "Could not auto-detect MoE gate module path. Pass gate_path explicitly "
+            "(examples: 'mlp.gate', 'block_sparse_moe.gate')."
+        )
+
+    def _get_config_first_int(self, keys: List[str]) -> Optional[int]:
+        cfg = getattr(self.model, "config", None)
+        if cfg is None:
+            return None
+        for key in keys:
+            val = getattr(cfg, key, None)
+            if isinstance(val, (int, float)):
+                val_i = int(val)
+                if val_i > 0:
+                    return val_i
+        return None
 
     def _init_buffer(self):
         if self.bucket_edges is None:
@@ -185,7 +296,13 @@ class ProfilerEngine:
         self._init_buffer()
         print(f"[Profiler] Attaching gate hooks to {self.num_layers} layers...")
         for i, layer in enumerate(self.layers):
-            gate = self.gate_getter(layer)  # e.g., layer.mlp.gate
+            try:
+                gate = self.gate_getter(layer)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to resolve gate module for layer {i} "
+                    f"(gate_path={self.gate_path}): {e}"
+                ) from e
             self.hooks.append(gate.register_forward_hook(self._get_hook(i)))
 
     def detach_hooks(self):
@@ -215,3 +332,118 @@ class ProfilerEngine:
                 self.model(**inputs)
         finally:
             self._current_attn_mask = None
+
+    def validate_buffer_or_raise(self) -> Dict[str, Any]:
+        """
+        Sanity-check captured routing telemetry.
+
+        Validates:
+          - counts sum equals tracked total assignments
+          - mass tensors are finite (when enabled)
+          - optional mass bounds with/without top-k renormalization
+        """
+        layer_totals: List[int] = []
+        token_totals: List[int] = []
+        for layer_idx in range(self.num_layers):
+            layer_buf = self.data_buffer[layer_idx]
+            counts = layer_buf["counts"]
+            total_obj = layer_buf["total"]
+            mass = layer_buf.get("mass", None)
+
+            if self.bucket_edges is None:
+                counted = int(counts.sum().item())
+                tracked = int(total_obj)
+                if counted != tracked:
+                    raise RuntimeError(
+                        f"Profiler sanity failed at layer {layer_idx}: "
+                        f"counts.sum={counted} != total={tracked}"
+                    )
+                layer_totals.append(tracked)
+                token_totals.append(tracked // self.top_k)
+
+                if self.store_mass and mass is not None:
+                    if not torch.isfinite(mass).all():
+                        raise RuntimeError(f"Profiler sanity failed at layer {layer_idx}: mass has NaN/Inf values.")
+
+                    mass_sum = float(mass.sum().item())
+                    tokens = tracked / float(self.top_k)
+                    if self.renorm_topk_prob:
+                        tol = max(1e-2, tokens * 1e-3)
+                        if abs(mass_sum - tokens) > tol:
+                            raise RuntimeError(
+                                f"Profiler sanity failed at layer {layer_idx}: "
+                                f"renorm mass_sum={mass_sum:.6f} not close to tokens={tokens:.6f} (tol={tol:.6f})"
+                            )
+                    else:
+                        # Without renorm, per-token top-k mass is in (0, 1], so aggregate mass must be in [0, tokens].
+                        tol = max(1e-2, tokens * 1e-3)
+                        if mass_sum < -tol or mass_sum > tokens + tol:
+                            raise RuntimeError(
+                                f"Profiler sanity failed at layer {layer_idx}: "
+                                f"mass_sum={mass_sum:.6f} outside [0, {tokens:.6f}]"
+                            )
+            else:
+                if not isinstance(total_obj, list):
+                    raise RuntimeError(
+                        f"Profiler sanity failed at layer {layer_idx}: bucketed totals should be list, got {type(total_obj)}"
+                    )
+                if counts.dim() != 2:
+                    raise RuntimeError(
+                        f"Profiler sanity failed at layer {layer_idx}: bucketed counts should be 2D, got {tuple(counts.shape)}"
+                    )
+                if counts.shape[0] != len(total_obj):
+                    raise RuntimeError(
+                        f"Profiler sanity failed at layer {layer_idx}: bucket count mismatch "
+                        f"counts.shape[0]={counts.shape[0]} vs len(total)={len(total_obj)}"
+                    )
+
+                tracked_layer = 0
+                for bucket_idx in range(len(total_obj)):
+                    counted_b = int(counts[bucket_idx].sum().item())
+                    tracked_b = int(total_obj[bucket_idx])
+                    if counted_b != tracked_b:
+                        raise RuntimeError(
+                            f"Profiler sanity failed at layer {layer_idx}, bucket {bucket_idx}: "
+                            f"counts.sum={counted_b} != total={tracked_b}"
+                        )
+                    tracked_layer += tracked_b
+
+                    if self.store_mass and mass is not None:
+                        if not torch.isfinite(mass[bucket_idx]).all():
+                            raise RuntimeError(
+                                f"Profiler sanity failed at layer {layer_idx}, bucket {bucket_idx}: mass has NaN/Inf."
+                            )
+                        mass_sum_b = float(mass[bucket_idx].sum().item())
+                        tokens_b = tracked_b / float(self.top_k)
+                        tol_b = max(1e-2, tokens_b * 1e-3)
+                        if self.renorm_topk_prob:
+                            if abs(mass_sum_b - tokens_b) > tol_b:
+                                raise RuntimeError(
+                                    f"Profiler sanity failed at layer {layer_idx}, bucket {bucket_idx}: "
+                                    f"renorm mass_sum={mass_sum_b:.6f} not close to tokens={tokens_b:.6f} "
+                                    f"(tol={tol_b:.6f})"
+                                )
+                        else:
+                            if mass_sum_b < -tol_b or mass_sum_b > tokens_b + tol_b:
+                                raise RuntimeError(
+                                    f"Profiler sanity failed at layer {layer_idx}, bucket {bucket_idx}: "
+                                    f"mass_sum={mass_sum_b:.6f} outside [0, {tokens_b:.6f}]"
+                                )
+
+                layer_totals.append(tracked_layer)
+                token_totals.append(tracked_layer // self.top_k)
+
+        if layer_totals:
+            first_total = layer_totals[0]
+            if any(t != first_total for t in layer_totals[1:]):
+                raise RuntimeError(
+                    "Profiler sanity failed: assignment totals differ across layers "
+                    f"(totals={layer_totals})"
+                )
+
+        return {
+            "layers_checked": self.num_layers,
+            "assignments_per_layer": layer_totals,
+            "tokens_per_layer": token_totals,
+            "renorm_topk_prob": self.renorm_topk_prob,
+        }

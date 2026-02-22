@@ -22,6 +22,9 @@ def make_profile(
     seq_len: int = 2048,
     bucket_edges: Optional[List[int]] = None,
     store_mass: bool = True,
+    gate_path: Optional[str] = None,
+    num_experts: Optional[int] = None,
+    top_k: Optional[int] = None,
 ) -> str:
     """
     Runs the ProfilerEngine on a dataset and saves the raw telemetry .pt file.
@@ -51,6 +54,9 @@ def make_profile(
         seq_len=seq_len,
         bucket_edges=bucket_edges,
         store_mass=store_mass,
+        gate_path=gate_path,
+        num_experts=num_experts,
+        top_k=top_k,
     )
 
     eng.attach_hooks()
@@ -82,6 +88,12 @@ def make_profile(
         eng.detach_hooks()
         torch.cuda.empty_cache()
 
+    sanity = eng.validate_buffer_or_raise()
+    print(
+        f"[Profiler] sanity ok: layers={sanity['layers_checked']} "
+        f"assignments/layer={sanity['assignments_per_layer'][0] if sanity['assignments_per_layer'] else 0}"
+    )
+
     suffix = "bucketed" if bucket_edges is not None else "global"
     count_str = f"n{selected_n}" if n_samples is not None else "full"
     filename = f"telemetry_{dataset_key}_{target_split}_{count_str}_{run_name}_{suffix}.pt"
@@ -100,7 +112,9 @@ def make_profile(
             "seq_len": seq_len,
             "layers": eng.num_layers,
             "experts": eng.num_experts,
-            "k": eng.top_k
+            "k": eng.top_k,
+            "gate_path": gate_path,
+            "sanity": sanity,
         }
     }
 
