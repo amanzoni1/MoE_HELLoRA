@@ -7,6 +7,7 @@ from typing import List, Dict, Optional
 # Target Name Generators (OLMoE/Mixtral specific)
 ATTN_PROJS = ["q_proj", "k_proj", "v_proj", "o_proj"]
 EXPERT_PROJS = ["gate_proj", "up_proj", "down_proj"]
+FULL_TARGET_SUFFIXES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate", "gate_proj", "up_proj", "down_proj"]
 
 def targets_attention(num_layers: int) -> List[str]:
     """Returns attention module names for all layers."""
@@ -15,15 +16,6 @@ def targets_attention(num_layers: int) -> List[str]:
 def targets_router_gates(num_layers: int) -> List[str]:
     """Returns router gate module names for all layers."""
     return [f"model.layers.{l}.mlp.gate" for l in range(num_layers)]
-
-def targets_all_experts(num_layers: int, num_experts: int) -> List[str]:
-    """Returns ALL expert module names (for Full LoRA)."""
-    return [
-        f"model.layers.{l}.mlp.experts.{e}.{p}"
-        for l in range(num_layers)
-        for e in range(num_experts)
-        for p in EXPERT_PROJS
-    ]
 
 def targets_hot_experts(hot_map: Dict[str, List[int]]) -> List[str]:
     """Returns ONLY the specific experts listed in the hot_map."""
@@ -34,6 +26,11 @@ def targets_hot_experts(hot_map: Dict[str, List[int]]) -> List[str]:
             for p in EXPERT_PROJS:
                 targets.append(f"model.layers.{layer_idx}.mlp.experts.{e}.{p}")
     return targets
+
+
+def full_target_suffixes() -> List[str]:
+    """Compact target list for full LoRA via suffix matching in PEFT."""
+    return list(FULL_TARGET_SUFFIXES)
 
 
 def build_random_hotmap(num_layers: int, num_experts: int, k: int, seed: int) -> Dict[str, List[int]]:
@@ -87,6 +84,43 @@ def validate_targets(model, targets: List[str]) -> List[str]:
 
     return kept
 
+
+def expected_full_linear_module_count(num_layers: int, num_experts: int) -> int:
+    # 4 attn projections + 1 router gate + 3 expert projections per expert.
+    return num_layers * (len(ATTN_PROJS) + 1 + (len(EXPERT_PROJS) * num_experts))
+
+
+def match_linear_modules_by_suffix(model, suffixes: List[str]):
+    matched = []
+    for name, module in model.named_modules():
+        if not (hasattr(module, "in_features") and hasattr(module, "out_features")):
+            continue
+        if any(name.endswith(f".{suffix}") for suffix in suffixes):
+            matched.append(module)
+    return matched
+
+
+def full_target_sanity(model, suffixes: List[str], num_layers: int, num_experts: int, lora_rank: int):
+    matched_linear_modules = match_linear_modules_by_suffix(model, suffixes)
+    matched_count = len(matched_linear_modules)
+    expected_modules = expected_full_linear_module_count(num_layers, num_experts)
+    if matched_count != expected_modules:
+        raise RuntimeError(
+            f"Full-LoRA sanity check failed: matched {matched_count} modules, expected {expected_modules}. "
+            "This would break comparability."
+        )
+
+    # LoRA trainable params per linear = r * (in_features + out_features) when bias='none'.
+    expected_trainable_params = sum(
+        lora_rank * (int(m.in_features) + int(m.out_features))
+        for m in matched_linear_modules
+    )
+    return {
+        "matched_count": matched_count,
+        "expected_modules": expected_modules,
+        "expected_trainable_params": expected_trainable_params,
+    }
+
 # Main Entry Point
 def get_targets(
     model,
@@ -113,21 +147,22 @@ def get_targets(
 
     print(f"Building targets for mode='{mode}' (L={num_layers}, E={num_experts})...")
 
+    if mode == "full":
+        targets = full_target_suffixes()
+        print(f"   + Attention targets: {len(ATTN_PROJS) * num_layers}")
+        print(f"   + Router gate targets: {num_layers}")
+        print(f"   + Expert targets (FULL): {num_layers * num_experts * len(EXPERT_PROJS)}")
+        print(f"   + Target suffixes (FULL): {len(targets)}")
+        return targets
+
     # Always target Attention & Routers
     attn_targets = targets_attention(num_layers)
     gate_targets = targets_router_gates(num_layers)
     targets = attn_targets + gate_targets
 
     # Add Experts based on Mode
-    if mode == "full":
-        expert_targets = targets_all_experts(num_layers, num_experts)
-        targets += expert_targets
 
-        print(f"   + Attention targets: {len(attn_targets)}")
-        print(f"   + Router gate targets: {len(gate_targets)}")
-        print(f"   + Expert targets (FULL): {len(expert_targets)}")
-
-    elif mode == "hot":
+    if mode == "hot":
         if not hotmap_json:
             raise ValueError("Mode 'hot' requires a valid 'hotmap_json' path.")
 

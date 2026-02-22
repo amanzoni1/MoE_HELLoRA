@@ -3,6 +3,7 @@ import os
 import json
 import shutil
 import time
+import inspect
 import torch
 from typing import Optional, Dict, List, Any
 
@@ -24,7 +25,7 @@ except ImportError:
 
 from .config import SYS_CFG, TRAIN_CFG
 from .data_registry import DATASETS, load_and_format_dataset
-from .utils_training import get_targets, infer_hot_k, build_random_hotmap
+from .utils_training import get_targets, infer_hot_k, build_random_hotmap, full_target_sanity
 
 
 # Helpers
@@ -187,6 +188,13 @@ def run_training(
     else:
         model.config.use_cache = TRAIN_CFG.use_cache
 
+    if hasattr(model, "model"):
+        layers = model.model.layers
+    else:
+        layers = model.layers
+    num_layers = len(layers)
+    num_experts = getattr(model.config, "num_experts", 64)
+
     # Target Selection
     targets = get_targets(
         model,
@@ -195,16 +203,23 @@ def run_training(
         random_k=random_k,
         random_seed=random_seed_eff,
     )
+    full_expected_trainable_params = None
+    if mode == "full":
+        sanity = full_target_sanity(
+            model=model,
+            suffixes=targets,
+            num_layers=num_layers,
+            num_experts=num_experts,
+            lora_rank=r_eff,
+        )
+        print(f"   + Matched linear modules (FULL): {sanity['matched_count']}")
+        print(f"   + Expected LoRA trainable params (FULL): {sanity['expected_trainable_params']:,}")
+        full_expected_trainable_params = sanity["expected_trainable_params"]
+
     random_hotmap = None
     if mode == "random":
         if random_k is None:
             raise ValueError("mode='random' requires random_k")
-        if hasattr(model, "model"):
-            layers = model.model.layers
-        else:
-            layers = model.layers
-        num_layers = len(layers)
-        num_experts = getattr(model.config, "num_experts", 64)
         random_hotmap = build_random_hotmap(num_layers, num_experts, int(random_k), int(random_seed_eff))
 
     # PEFT Application
@@ -220,6 +235,11 @@ def run_training(
 
     # Log Trainable Params
     trainable, total = model.get_nb_trainable_parameters()
+    if mode == "full" and full_expected_trainable_params is not None and trainable != full_expected_trainable_params:
+        raise RuntimeError(
+            f"Full-LoRA sanity check failed: trainable params {trainable:,} != expected {full_expected_trainable_params:,}. "
+            "Target matching changed unexpectedly."
+        )
     print(f"\n📊 [{dataset_key}/{run_name}] Trainable: {trainable:,} / {total:,} ({trainable/total:.2%})")
     if use_wandb_eff and wandb is not None:
         wandb.log({
@@ -264,7 +284,7 @@ def run_training(
     )
 
     # Training Arguments
-    args = TrainingArguments(
+    training_args_kwargs = dict(
         output_dir=out_dir,
         seed=seed_eff,
         per_device_train_batch_size=bs_eff,
@@ -278,8 +298,13 @@ def run_training(
         save_strategy="epoch",
         save_total_limit=TRAIN_CFG.save_total_limit,
         report_to="wandb" if use_wandb_eff else "none",
-        remove_unused_columns=True
+        remove_unused_columns=True,
     )
+    # Keep HF Trainer/W&B config aligned with our effective dataset shuffle seed.
+    if "data_seed" in inspect.signature(TrainingArguments).parameters:
+        training_args_kwargs["data_seed"] = data_seed_eff
+
+    args = TrainingArguments(**training_args_kwargs)
 
     trainer = Trainer(
         model=model,
