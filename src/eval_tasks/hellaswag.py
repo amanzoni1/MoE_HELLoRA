@@ -1,23 +1,23 @@
 import json
 import os
-import re
-from typing import Optional
+from typing import List
 
+import torch
 from datasets import load_dataset
 from tqdm.auto import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 
 try:
     import wandb
 except ImportError:
     wandb = None
 
+from ..config import TRAIN_CFG
 from ..data_registry import EVAL_DATASETS
 
-OPTION_LETTERS = ("A", "B", "C", "D")
-
-
-def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip().lower())
+OPTION_IDS = ("0", "1", "2", "3")
+CUSTOM_EVAL = True
 
 
 def _context_from_example(ex) -> str:
@@ -31,219 +31,234 @@ def _context_from_example(ex) -> str:
 
 def _label_to_index(label) -> int:
     if isinstance(label, int):
-        return label
+        return label if 0 <= label < 4 else -1
     if label is None:
         return -1
     s = str(label).strip()
     if s.isdigit():
         idx = int(s)
         return idx if 0 <= idx < 4 else -1
-    s = s.upper()
-    if s in OPTION_LETTERS:
-        return OPTION_LETTERS.index(s)
     return -1
 
 
-def _extract_pred_index(pred_text: str, endings) -> Optional[int]:
-    if not pred_text:
-        return None
-
-    lines = [ln.strip() for ln in pred_text.splitlines() if ln.strip()]
-    first_line = lines[0] if lines else pred_text.strip()
-
-    def _line_to_choice(line: str) -> Optional[int]:
-        if not line:
-            return None
-        line = line.strip()
-        line = re.sub(r"(?i)^answer\s*[:\-]?\s*", "", line).strip()
-
-        # Direct single-token answers.
-        if re.fullmatch(r"[ABCD]", line, flags=re.IGNORECASE):
-            return OPTION_LETTERS.index(line.upper())
-        if re.fullmatch(r"[0-3]", line):
-            return int(line)
-
-        # Option-style prefixes, e.g. "B) ...", "2. ...".
-        m = re.match(r"^([ABCD])[\)\].:\-]\s*", line, flags=re.IGNORECASE)
-        if m:
-            return OPTION_LETTERS.index(m.group(1).upper())
-        m = re.match(r"^([0-3])[\)\].:\-]\s*", line)
-        if m:
-            return int(m.group(1))
-        return None
-
-    def _match_ending_from_text(text: str) -> Optional[int]:
-        t_norm = _normalize_text(text)
-        if not t_norm:
-            return None
-        best_idx = None
-        best_len = -1
-        for i, ending in enumerate(endings):
-            e_norm = _normalize_text(ending)
-            if not e_norm:
-                continue
-            if e_norm == t_norm or e_norm in t_norm or t_norm in e_norm:
-                if len(e_norm) > best_len:
-                    best_idx = i
-                    best_len = len(e_norm)
-        return best_idx
-
-    # Preferred: parse the first emitted line as answer.
-    idx = _line_to_choice(first_line)
-    if idx is not None:
-        return idx
-
-    # If the model outputs the ending text directly on the first line, use it.
-    idx = _match_ending_from_text(first_line)
-    if idx is not None:
-        return idx
-
-    # Secondary: explicit "Answer: X" anywhere.
-    answer_match = re.search(r"(?i)\banswer\s*[:\-]?\s*([ABCD]|[0-3])\b", pred_text)
-    if answer_match:
-        token = answer_match.group(1).upper()
-        if token in OPTION_LETTERS:
-            return OPTION_LETTERS.index(token)
-        return int(token)
-
-    # Tertiary: direct letter token in full output.
-    letter = re.search(r"\b([ABCD])\b", pred_text, flags=re.IGNORECASE)
-    if letter:
-        return OPTION_LETTERS.index(letter.group(1).upper())
-
-    # Numeric fallback only when it appears as a standalone answer-like line.
-    for line in lines[:3]:
-        idx = _line_to_choice(line)
-        if idx is not None:
-            return idx
-
-    # Fallback: model emitted ending text instead of option id.
-    pred_norm = _normalize_text(pred_text)
-    best_idx = None
-    best_pos = None
-    best_len = -1
-    for idx, ending in enumerate(endings):
-        ending_norm = _normalize_text(ending)
-        if not ending_norm:
-            continue
-        pos = pred_norm.find(ending_norm)
-        if pos == -1:
-            continue
-        # Prefer earliest match (often the actual answer line), then longer text.
-        if best_pos is None or pos < best_pos or (pos == best_pos and len(ending_norm) > best_len):
-            best_idx = idx
-            best_pos = pos
-            best_len = len(ending_norm)
-    return best_idx
-
-
-def _build_prompt(context: str, endings) -> str:
-    return (
-        f"Context: {context}\n\n"
-        "Choose the most plausible ending.\n"
-        f"A) {endings[0]}\n"
-        f"B) {endings[1]}\n"
-        f"C) {endings[2]}\n"
-        f"D) {endings[3]}\n"
-        "Answer with a single letter (A, B, C, or D).\n"
-        "Answer:"
-    )
+def _build_prefix(context: str, endings: List[str]) -> str:
+    # Keep eval prefix aligned with training formatting.
+    options = "\n".join(f"  {i}) {e}" for i, e in enumerate(endings))
+    return f"{context}\n{options}\nAnswer: "
 
 
 def add_args(parser):
-    return
+    parser.add_argument(
+        "--hs_length_norm",
+        action="store_true",
+        help="Length-normalize option log-likelihood by number of option tokens.",
+    )
+    parser.add_argument(
+        "--hs_max_len",
+        type=int,
+        default=TRAIN_CFG.max_len,
+        help=f"Max sequence length for HellaSwag scoring (default: {TRAIN_CFG.max_len}).",
+    )
+    parser.add_argument(
+        "--hs_options_per_pass",
+        type=int,
+        default=1,
+        choices=[1, 2, 4],
+        help="How many options to score in one forward pass. Higher can be faster but uses more VRAM.",
+    )
 
 
-def load_data(args):
+def _score_option_batch(
+    model,
+    tokenizer,
+    prefix_texts: List[str],
+    option_texts: List[str],
+    max_len: int,
+    length_norm: bool,
+) -> List[float]:
+    full_texts = [f"{p}{opt.strip()}" for p, opt in zip(prefix_texts, option_texts)]
+
+    tok_full = tokenizer(
+        full_texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_len,
+        add_special_tokens=False,
+    )
+    tok_prefix = tokenizer(
+        prefix_texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_len,
+        add_special_tokens=False,
+    )
+
+    device = model.device
+    input_ids = tok_full["input_ids"].to(device)
+    attention_mask = tok_full["attention_mask"].to(device)
+    prefix_lens = tok_prefix["attention_mask"].sum(dim=1).to(device)
+
+    with torch.inference_mode():
+        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+
+    shift_logits = logits[:, :-1, :].float()
+    shift_labels = input_ids[:, 1:]
+    shift_mask = attention_mask[:, 1:].bool()
+
+    token_logp = torch.log_softmax(shift_logits, dim=-1).gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
+    token_positions = torch.arange(1, input_ids.shape[1], device=device).unsqueeze(0)
+    # Boundary of continuation tokens in the full sequence.
+    # Works for both right- and left-padding (left_pad=0 for right-padding).
+    left_pad = attention_mask.to(torch.int64).argmax(dim=1)
+    prefix_end_positions = left_pad + prefix_lens
+    candidate_mask = token_positions >= prefix_end_positions.unsqueeze(1)
+    valid_mask = shift_mask & candidate_mask
+
+    token_counts = valid_mask.sum(dim=1)
+    seq_scores = (token_logp * valid_mask).sum(dim=1)
+    if length_norm:
+        seq_scores = seq_scores / token_counts.clamp(min=1)
+    # If truncation removed the whole option, make this candidate impossible.
+    seq_scores = torch.where(token_counts > 0, seq_scores, torch.full_like(seq_scores, -1e9))
+    return seq_scores.detach().cpu().tolist()
+
+
+def run_custom_eval(args):
+    if args.backend != "hf":
+        print(f"[HellaSwag] log-likelihood ranking uses HF logits; ignoring backend='{args.backend}'.")
+
     print("Loading HellaSwag...")
     ds_cfg = EVAL_DATASETS["hellaswag"]
     ds = load_dataset(ds_cfg["path"], ds_cfg["name"], split=ds_cfg["split"])
     if args.n:
         ds = ds.select(range(min(args.n, len(ds))))
 
-    prompts = []
+    prefixes = []
+    endings_list = []
     golds = []
     for ex in ds:
         endings = ex.get("endings", [])
         if len(endings) != 4:
             raise ValueError(f"HellaSwag example has {len(endings)} endings (expected 4).")
-        context = _context_from_example(ex)
-        prompts.append(_build_prompt(context, endings))
+        prefixes.append(_build_prefix(_context_from_example(ex), endings))
+        endings_list.append(endings)
         golds.append(_label_to_index(ex.get("label")))
-    return ds, prompts, golds
 
-
-def score_and_save(args, ds, prompts, golds, outputs):
     if args.wandb and wandb:
-        wandb.init(
-            project=args.wandb_project,
-            name=f"eval/{args.run_name}",
-            config=vars(args),
-        )
+        wandb.init(project=args.wandb_project, name=f"eval/{args.run_name}", config=vars(args))
         wb_table = wandb.Table(
-            columns=["context", "gold_idx", "pred_idx", "pred_text", "ending_a", "ending_b", "ending_c", "ending_d"]
+            columns=["context", "gold_idx", "pred_idx", "logp_0", "logp_1", "logp_2", "logp_3", "ending_0", "ending_1", "ending_2", "ending_3"]
         )
 
-    correct = 0
-    wrong_logged = 0
+    print(f"[HF] Loading model: {args.model}")
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True, padding_side="right")
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        trust_remote_code=True,
+    )
+    model.config.use_cache = False
+    if args.adapter:
+        print(f"[HF] Loading LoRA adapter: {args.adapter}")
+        model = PeftModel.from_pretrained(model, args.adapter)
+        model.config.use_cache = False
+    model.eval()
+
+    n = len(prefixes)
+    option_scores = [[0.0, 0.0, 0.0, 0.0] for _ in range(n)]
+    options_per_pass = max(1, min(4, int(args.hs_options_per_pass)))
+    option_groups = [list(range(i, min(i + options_per_pass, 4))) for i in range(0, 4, options_per_pass)]
+    print(f"[HellaSwag] options_per_pass={options_per_pass} (effective batch = bs x {options_per_pass})")
+    for group in option_groups:
+        group_name = ",".join(OPTION_IDS[i] for i in group)
+        desc = f"Scoring options {group_name}"
+        for start in tqdm(range(0, n, args.bs), desc=desc):
+            end = min(start + args.bs, n)
+            batch_prefixes = prefixes[start:end]
+            flat_prefixes = []
+            flat_options = []
+            flat_meta = []  # (global_example_idx, option_idx)
+            for local_i, ex_endings in enumerate(endings_list[start:end]):
+                global_i = start + local_i
+                for opt_idx in group:
+                    flat_prefixes.append(batch_prefixes[local_i])
+                    flat_options.append(ex_endings[opt_idx])
+                    flat_meta.append((global_i, opt_idx))
+
+            flat_scores = _score_option_batch(
+                model=model,
+                tokenizer=tokenizer,
+                prefix_texts=flat_prefixes,
+                option_texts=flat_options,
+                max_len=args.hs_max_len,
+                length_norm=args.hs_length_norm,
+            )
+            for (global_i, opt_idx), score in zip(flat_meta, flat_scores):
+                option_scores[global_i][opt_idx] = float(score)
+
+    pred_idxs = [max(range(4), key=lambda i: row[i]) for row in option_scores]
+    correct = sum(1 for g, p in zip(golds, pred_idxs) if g >= 0 and g == p)
+    total = len(golds)
+    acc = correct / total if total else 0.0
 
     os.makedirs(args.output_dir, exist_ok=True)
     out_file = os.path.join(args.output_dir, f"{args.run_name}.jsonl")
-
-    print("Scoring results...")
+    wrong_logged = 0
     with open(out_file, "w", encoding="utf-8") as f:
-        for ex, gold, pred in tqdm(zip(ds, golds, outputs), total=len(prompts), desc="Scoring"):
-            endings = ex["endings"]
-            pred_idx = _extract_pred_index(pred, endings)
-            is_correct = (gold >= 0) and (pred_idx is not None) and (pred_idx == gold)
-            if is_correct:
-                correct += 1
-
+        for i, ex in enumerate(ds):
             res = {
                 "context": _context_from_example(ex),
-                "endings": endings,
-                "gold_idx": gold,
-                "pred_idx": pred_idx,
-                "pred_text": pred,
-                "correct": is_correct,
+                "endings": endings_list[i],
+                "gold_idx": golds[i],
+                "pred_idx": pred_idxs[i],
+                "pred_text": OPTION_IDS[pred_idxs[i]],
+                "choice_logprobs": option_scores[i],
+                "correct": bool(golds[i] >= 0 and pred_idxs[i] == golds[i]),
             }
             f.write(json.dumps(res) + "\n")
-
-            if args.wandb and wandb and (not is_correct) and wrong_logged < 100:
+            if args.wandb and wandb and (not res["correct"]) and wrong_logged < 100:
                 wb_table.add_data(
                     res["context"],
-                    gold,
-                    pred_idx,
-                    pred,
-                    endings[0],
-                    endings[1],
-                    endings[2],
-                    endings[3],
+                    res["gold_idx"],
+                    res["pred_idx"],
+                    res["choice_logprobs"][0],
+                    res["choice_logprobs"][1],
+                    res["choice_logprobs"][2],
+                    res["choice_logprobs"][3],
+                    res["endings"][0],
+                    res["endings"][1],
+                    res["endings"][2],
+                    res["endings"][3],
                 )
                 wrong_logged += 1
 
-    acc = correct / len(prompts) if prompts else 0.0
     print(f"\nFinal Accuracy: {acc:.2%}")
-
     summary = {
         "run_name": args.run_name,
         "model_name": args.model,
         "adapter": args.adapter,
         "dataset": "hellaswag",
         "split": EVAL_DATASETS["hellaswag"]["split"],
-        "n": len(prompts),
+        "n": total,
         "bs": args.bs,
-        "max_new_tokens": args.max_new_tokens,
+        "max_seq_len": args.hs_max_len,
+        "options_per_pass": options_per_pass,
+        "metric": "option_loglikelihood_acc",
+        "length_normalized": bool(args.hs_length_norm),
         "correct": correct,
-        "total": len(prompts),
+        "total": total,
         "acc": acc,
         "predictions_jsonl": out_file,
     }
-
     summary_path = os.path.join(args.output_dir, f"{args.run_name}_summary.json")
     with open(summary_path, "w", encoding="utf-8") as fsum:
         json.dump(summary, fsum, indent=2)
-
     print("[IO] saved:", summary_path)
 
     if args.wandb and wandb:
@@ -253,7 +268,7 @@ def score_and_save(args, ds, prompts, golds, outputs):
             {
                 "eval/acc": acc,
                 "eval/correct": correct,
-                "eval/total": len(prompts),
+                "eval/total": total,
                 "eval/wrong_examples": wb_table,
             }
         )
