@@ -44,7 +44,7 @@ def _label_to_index(label) -> int:
 def _build_prefix(context: str, endings: List[str]) -> str:
     # Keep eval prefix aligned with training formatting.
     options = "\n".join(f"  {i}) {e}" for i, e in enumerate(endings))
-    return f"{context}\n{options}\nAnswer: "
+    return f"{context}\n{options}\nAnswer:"
 
 
 def add_args(parser):
@@ -76,29 +76,40 @@ def _score_option_batch(
     max_len: int,
     length_norm: bool,
 ) -> List[float]:
-    full_texts = [f"{p}{opt.strip()}" for p, opt in zip(prefix_texts, option_texts)]
-
-    tok_full = tokenizer(
-        full_texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_len,
-        add_special_tokens=False,
-    )
-    tok_prefix = tokenizer(
+    # Tokenize prefix and continuation separately to avoid boundary-merge artifacts.
+    prefix_ids_batch = tokenizer(
         prefix_texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_len,
         add_special_tokens=False,
-    )
+    )["input_ids"]
+    option_ids_batch = tokenizer(
+        [f" {opt.strip()}" for opt in option_texts],
+        add_special_tokens=False,
+    )["input_ids"]
+
+    seqs = []
+    option_starts = []
+    for p_ids, o_ids in zip(prefix_ids_batch, option_ids_batch):
+        full_ids = p_ids + o_ids
+        if len(full_ids) > max_len:
+            full_ids = full_ids[:max_len]
+        seqs.append(full_ids)
+        option_starts.append(min(len(p_ids), max_len))
+
+    max_batch_len = max((len(s) for s in seqs), default=1)
+    pad_id = tokenizer.pad_token_id
+    input_ids = torch.full((len(seqs), max_batch_len), pad_id, dtype=torch.long)
+    attention_mask = torch.zeros((len(seqs), max_batch_len), dtype=torch.long)
+    for i, seq in enumerate(seqs):
+        if not seq:
+            continue
+        l = len(seq)
+        input_ids[i, :l] = torch.tensor(seq, dtype=torch.long)
+        attention_mask[i, :l] = 1
 
     device = model.device
-    input_ids = tok_full["input_ids"].to(device)
-    attention_mask = tok_full["attention_mask"].to(device)
-    prefix_lens = tok_prefix["attention_mask"].sum(dim=1).to(device)
+    input_ids = input_ids.to(device)
+    attention_mask = attention_mask.to(device)
+    option_starts = torch.tensor(option_starts, device=device)
 
     with torch.inference_mode():
         logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
@@ -109,11 +120,7 @@ def _score_option_batch(
 
     token_logp = torch.log_softmax(shift_logits, dim=-1).gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
     token_positions = torch.arange(1, input_ids.shape[1], device=device).unsqueeze(0)
-    # Boundary of continuation tokens in the full sequence.
-    # Works for both right- and left-padding (left_pad=0 for right-padding).
-    left_pad = attention_mask.to(torch.int64).argmax(dim=1)
-    prefix_end_positions = left_pad + prefix_lens
-    candidate_mask = token_positions >= prefix_end_positions.unsqueeze(1)
+    candidate_mask = token_positions >= option_starts.unsqueeze(1)
     valid_mask = shift_mask & candidate_mask
 
     token_counts = valid_mask.sum(dim=1)
