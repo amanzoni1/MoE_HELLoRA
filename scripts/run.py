@@ -18,6 +18,12 @@ def main():
     parser.add_argument("--task", type=str, required=True, choices=list(DATASETS.keys()))
     parser.add_argument("--mode", type=str, default="hot", choices=["hot", "dyn", "full", "random"])
     parser.add_argument("--model_tag", type=str, default=None, help="Short model tag for names (e.g. olmoe)")
+    parser.add_argument(
+        "--run_name_suffix",
+        type=str,
+        default="",
+        help="Optional suffix appended to auto run_name (example: _3e).",
+    )
     parser.add_argument("--seed", type=int, default=None, help=f"Override ({TRAIN_CFG.seed})")
     parser.add_argument(
         "--data_seed",
@@ -119,7 +125,7 @@ def main():
         mode_tag = f"randk{args.k}"
     else:
         mode_tag = "full_lora"
-    run_name = f"{model_tag}_{args.task}_s{seed_eff}_{mode_tag}"
+    run_name = f"{model_tag}_{args.task}_s{seed_eff}_{mode_tag}{args.run_name_suffix}"
 
     # Hotmap
     hotmap_path = None
