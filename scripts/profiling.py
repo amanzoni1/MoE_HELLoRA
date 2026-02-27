@@ -126,6 +126,18 @@ def main():
         device_map="auto",
         trust_remote_code=True,
     )
+    # Profiling does not need KV cache; disabling avoids remote-code cache API
+    # mismatches across transformers versions.
+    if hasattr(model, "config"):
+        try:
+            model.config.use_cache = False
+        except Exception:
+            pass
+    if hasattr(model, "generation_config"):
+        try:
+            model.generation_config.use_cache = False
+        except Exception:
+            pass
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

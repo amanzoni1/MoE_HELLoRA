@@ -365,7 +365,12 @@ class ProfilerEngine:
         try:
             self.model.eval()
             with torch.inference_mode():
-                self.model(**inputs)
+                try:
+                    self.model(**inputs, use_cache=False)
+                except TypeError:
+                    # Some remote-code models may not expose `use_cache` in the
+                    # forward signature; fall back to plain call.
+                    self.model(**inputs)
         finally:
             self._current_attn_mask = None
 
