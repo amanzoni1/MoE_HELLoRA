@@ -22,7 +22,8 @@ import os
 import sys
 import time
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+import transformers.utils.import_utils as _tf_import_utils
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
@@ -31,6 +32,25 @@ if ROOT_DIR not in sys.path:
 from src.utils_profiling import make_profile
 from src.config import TRAIN_CFG, SYS_CFG
 from src.data_registry import DATASETS
+
+
+def _prepare_remote_code_compat() -> None:
+    # Some remote model repos still import this helper from older transformers APIs.
+    if not hasattr(_tf_import_utils, "is_torch_fx_available"):
+        _tf_import_utils.is_torch_fx_available = lambda: hasattr(torch, "fx")
+
+
+def _prepare_model_config(model_id: str):
+    cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+
+    # DeepSeek remote code may expect rope_scaling["type"] while newer configs
+    # provide rope_scaling["rope_type"].
+    rope_scaling = getattr(cfg, "rope_scaling", None)
+    if isinstance(rope_scaling, dict) and "type" not in rope_scaling:
+        rope_scaling = dict(rope_scaling)
+        rope_scaling["type"] = rope_scaling.get("rope_type", "linear")
+        cfg.rope_scaling = rope_scaling
+    return cfg
 
 
 def main():
@@ -74,9 +94,12 @@ def main():
 
     # Load model once
     print(f"Loading model {args.model}...")
+    _prepare_remote_code_compat()
+    model_cfg = _prepare_model_config(args.model)
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=torch.bfloat16,
+        config=model_cfg,
+        dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )
