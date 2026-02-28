@@ -2,12 +2,33 @@ import os
 import json
 import random
 from typing import Any, List, Dict, Optional
+import torch
+
+try:
+    from transformers.pytorch_utils import Conv1D as HFConv1D
+except Exception:
+    HFConv1D = tuple()  # type: ignore
 
 
 # Target Name Generators (OLMoE/Mixtral specific)
 ATTN_PROJS = ["q_proj", "k_proj", "v_proj", "o_proj"]
 EXPERT_PROJS = ["gate_proj", "up_proj", "down_proj"]
 FULL_TARGET_SUFFIXES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate", "gate_proj", "up_proj", "down_proj"]
+
+
+def _is_lora_supported_module(module) -> bool:
+    """Mirror PEFT-supported base module families."""
+    base = (
+        torch.nn.Linear,
+        torch.nn.Embedding,
+        torch.nn.Conv1d,
+        torch.nn.Conv2d,
+        torch.nn.Conv3d,
+        torch.nn.MultiheadAttention,
+    )
+    if HFConv1D:
+        return isinstance(module, base + (HFConv1D,))
+    return isinstance(module, base)
 
 def targets_attention(num_layers: int) -> List[str]:
     """Returns attention module names for all layers."""
@@ -31,6 +52,22 @@ def targets_hot_experts(hot_map: Dict[str, List[int]]) -> List[str]:
 def full_target_suffixes() -> List[str]:
     """Compact target list for full LoRA via suffix matching in PEFT."""
     return list(FULL_TARGET_SUFFIXES)
+
+
+def full_target_suffixes_for_model(model) -> List[str]:
+    """
+    Keep only suffixes that match at least one LoRA-supported module in this model.
+    This avoids PEFT crashes on non-linear router modules (e.g., custom MoEGate).
+    """
+    candidates = full_target_suffixes()
+    matched = set()
+    for name, module in model.named_modules():
+        if not _is_lora_supported_module(module):
+            continue
+        for suffix in candidates:
+            if name.endswith(f".{suffix}"):
+                matched.add(suffix)
+    return [s for s in candidates if s in matched]
 
 
 def build_random_hotmap(num_layers: int, num_experts: int, k: int, seed: int) -> Dict[str, List[int]]:
@@ -99,8 +136,17 @@ def infer_hotmap_stats(hotmap_json: Optional[str]) -> Optional[Dict[str, Any]]:
 
 def validate_targets(model, targets: List[str]) -> List[str]:
     """Filters out targets that don't strictly exist in the model."""
-    existing_modules = set(n for n, _ in model.named_modules())
-    kept = [t for t in targets if t in existing_modules]
+    existing_modules = dict(model.named_modules())
+    kept = []
+    unsupported = []
+    for t in targets:
+        module = existing_modules.get(t)
+        if module is None:
+            continue
+        if _is_lora_supported_module(module):
+            kept.append(t)
+        else:
+            unsupported.append((t, module.__class__.__name__))
 
     if not kept:
         raise RuntimeError("No targets matched! Check your model architecture vs. naming logic.")
@@ -108,6 +154,12 @@ def validate_targets(model, targets: List[str]) -> List[str]:
     missing = len(targets) - len(kept)
     if missing > 0:
         print(f"[Target Selector] Filtered out {missing} invalid targets (kept {len(kept)}).")
+    if unsupported:
+        preview = ", ".join(f"{name}<{cls}>" for name, cls in unsupported[:5])
+        print(
+            "[Target Selector] Skipped unsupported LoRA modules: "
+            f"{preview}{' ...' if len(unsupported) > 5 else ''}"
+        )
 
     return kept
 
@@ -189,11 +241,16 @@ def get_targets(
     print(f"Building targets for mode='{mode}' (L={num_layers}, E={num_experts})...")
 
     if mode == "full":
-        targets = full_target_suffixes()
+        targets = full_target_suffixes_for_model(model)
+        if "gate" not in targets:
+            print("[Target Selector] Skipping '.gate' in FULL mode (no supported linear gate modules found).")
+        if not targets:
+            raise RuntimeError("No supported FULL target suffixes found for this model.")
         print(f"   + Attention targets: {len(ATTN_PROJS) * num_layers}")
-        print(f"   + Router gate targets: {num_layers}")
+        print(f"   + Router gate targets: {num_layers if 'gate' in targets else 0}")
         print(f"   + Expert targets (FULL): {num_layers * num_experts * len(EXPERT_PROJS)}")
         print(f"   + Target suffixes (FULL): {len(targets)}")
+        print(f"   + Suffix list: {targets}")
         return targets
 
     # Always target Attention & Routers
