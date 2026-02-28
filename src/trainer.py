@@ -30,6 +30,7 @@ from .utils_training import (
     get_targets,
     infer_hot_k,
     infer_hotmap_stats,
+    infer_num_routed_experts,
     build_random_hotmap,
     full_target_sanity,
 )
@@ -267,7 +268,7 @@ def run_training(
     else:
         layers = model.layers
     num_layers = len(layers)
-    num_experts = getattr(model.config, "num_experts", 64)
+    num_experts = infer_num_routed_experts(model.config)
 
     # Target Selection
     targets = get_targets(

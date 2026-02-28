@@ -14,6 +14,15 @@ except Exception:
 ATTN_PROJS = ["q_proj", "k_proj", "v_proj", "o_proj"]
 EXPERT_PROJS = ["gate_proj", "up_proj", "down_proj"]
 FULL_TARGET_SUFFIXES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate", "gate_proj", "up_proj", "down_proj"]
+GATE_PATH_CANDIDATES = [
+    "mlp.gate",
+    "mlp.router",
+    "block_sparse_moe.gate",
+    "feed_forward.router",
+    "ffn.router",
+    "moe.gate",
+]
+SHARED_EXPERT_ROOTS = ["shared_experts", "shared_expert"]
 
 
 def _is_lora_supported_module(module) -> bool:
@@ -30,13 +39,52 @@ def _is_lora_supported_module(module) -> bool:
         return isinstance(module, base + (HFConv1D,))
     return isinstance(module, base)
 
+
+def infer_num_routed_experts(config) -> int:
+    """Robust routed expert count across different model config schemas."""
+    for key in ("num_experts", "num_local_experts", "n_routed_experts", "n_experts"):
+        val = getattr(config, key, None)
+        if isinstance(val, (int, float)) and int(val) > 0:
+            return int(val)
+    raise ValueError("Cannot infer routed expert count from model config.")
+
+
 def targets_attention(num_layers: int) -> List[str]:
     """Returns attention module names for all layers."""
     return [f"model.layers.{l}.self_attn.{p}" for l in range(num_layers) for p in ATTN_PROJS]
 
-def targets_router_gates(num_layers: int) -> List[str]:
-    """Returns router gate module names for all layers."""
-    return [f"model.layers.{l}.mlp.gate" for l in range(num_layers)]
+def targets_router_gates(num_layers: int, existing_modules: Optional[set] = None) -> List[str]:
+    """Returns router gate module names for all layers with path auto-detection."""
+    if existing_modules is None:
+        return [f"model.layers.{l}.mlp.gate" for l in range(num_layers)]
+
+    targets = []
+    for l in range(num_layers):
+        layer_base = f"model.layers.{l}."
+        for suffix in GATE_PATH_CANDIDATES:
+            candidate = layer_base + suffix
+            if candidate in existing_modules:
+                targets.append(candidate)
+                break
+    return targets
+
+
+def targets_shared_experts(num_layers: int, existing_modules: Optional[set] = None) -> List[str]:
+    """
+    Returns shared expert projection module names for all layers.
+    Handles both 'shared_experts' (DeepSeek) and 'shared_expert' (Qwen) paths.
+    """
+    if existing_modules is None:
+        return []
+
+    targets = []
+    for l in range(num_layers):
+        for shared_root in SHARED_EXPERT_ROOTS:
+            for proj in EXPERT_PROJS:
+                name = f"model.layers.{l}.mlp.{shared_root}.{proj}"
+                if name in existing_modules:
+                    targets.append(name)
+    return targets
 
 def targets_hot_experts(hot_map: Dict[str, List[int]]) -> List[str]:
     """Returns ONLY the specific experts listed in the hot_map."""
@@ -236,7 +284,8 @@ def get_targets(
         layers = model.layers
 
     num_layers = len(layers)
-    num_experts = getattr(model.config, "num_experts", 64)
+    num_experts = infer_num_routed_experts(model.config)
+    existing_modules = set(n for n, _ in model.named_modules())
 
     print(f"Building targets for mode='{mode}' (L={num_layers}, E={num_experts})...")
 
@@ -255,8 +304,9 @@ def get_targets(
 
     # Always target Attention & Routers
     attn_targets = targets_attention(num_layers)
-    gate_targets = targets_router_gates(num_layers)
-    targets = attn_targets + gate_targets
+    gate_targets = targets_router_gates(num_layers, existing_modules)
+    shared_targets = targets_shared_experts(num_layers, existing_modules)
+    targets = attn_targets + gate_targets + shared_targets
 
     # Add Experts based on Mode
 
@@ -270,6 +320,7 @@ def get_targets(
 
         print(f"   + Attention targets: {len(attn_targets)}")
         print(f"   + Router gate targets: {len(gate_targets)}")
+        print(f"   + Shared expert targets: {len(shared_targets)}")
         if mode == "dyn":
             print(f"   + Expert targets (DYN): {len(expert_targets)}")
         else:
@@ -291,6 +342,7 @@ def get_targets(
 
         print(f"   + Attention targets: {len(attn_targets)}")
         print(f"   + Router gate targets: {len(gate_targets)}")
+        print(f"   + Shared expert targets: {len(shared_targets)}")
         print(f"   + Expert targets (RANDOM): {len(expert_targets)}")
         print(f"   + Random seed: {seed_eff}")
         print(f"   + Random k: {int(random_k)}")
@@ -300,4 +352,16 @@ def get_targets(
 
     # Validate against actual model
     final_targets = validate_targets(model, targets)
+    gate_target_set = set(gate_targets)
+    gate_survived = [t for t in final_targets if t in gate_target_set]
+    if gate_targets and not gate_survived:
+        print(
+            "⚠️  [Target Selector] All detected router gate modules were filtered out. "
+            "Gate adapters will not be trained for this model."
+        )
+    if not gate_targets:
+        print(
+            "⚠️  [Target Selector] No router gate modules detected from known paths. "
+            "Proceeding without gate adapters."
+        )
     return final_targets
